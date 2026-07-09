@@ -1,0 +1,19 @@
+# Android / Gradle
+.gradle/
+.kotlin/
+**/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# Generated packages and screenshots
+*.apk
+*.aab
+screen*.png
+window_home.xml
+
+# OS
+Thumbs.db
+.DS_Store

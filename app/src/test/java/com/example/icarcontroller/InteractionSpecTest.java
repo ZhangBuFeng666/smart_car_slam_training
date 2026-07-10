@@ -10,8 +10,8 @@ import static org.junit.Assert.assertTrue;
 
 public class InteractionSpecTest {
     @Test
-    public void aiAssistantUsesBottomSheetInsteadOfAStaticPage() {
-        assertEquals("bottom_sheet", InteractionSpec.aiPresentation());
+    public void aiAssistantUsesAFirstClassPage() {
+        assertEquals("full_page", InteractionSpec.aiPresentation());
     }
 
     @Test
@@ -33,6 +33,40 @@ public class InteractionSpecTest {
         assertTrue((Float) requiredSpec("navSelectionScale") > 1.0f);
         assertTrue((Integer) requiredSpec("statusPulseMillis") >= 260);
         assertTrue((Integer) requiredSpec("remoteRepeatMillis") <= 220);
+    }
+
+    @Test
+    public void digitalKeyShellHasDedicatedStageMetrics() {
+        assertTrue((Integer) requiredSpec("keyHeroHeightDp") >= 360);
+        assertTrue((Integer) requiredSpec("sheetPeekHeightDp") >= 240);
+        assertTrue((Integer) requiredSpec("modeTileHeightDp") >= 92);
+    }
+
+    @Test
+    public void obsidianHomeReservesSpaceForTheDynamicVehicleStage() {
+        assertTrue((Integer) requiredSpec("obsidianHeroHeightDp") >= 600);
+        assertTrue((Integer) requiredSpec("vehicleStageHeightDp") >= 300);
+        assertTrue((Integer) requiredSpec("obsidianPrimaryHeightDp") >= 54);
+        assertTrue((Integer) requiredSpec("obsidianActionGapDp") >= 16);
+        assertTrue((Integer) requiredSpec("obsidianBottomClearanceDp") <= 16);
+        assertEquals(true, requiredSpec("homeUsesDarkSystemBars"));
+    }
+
+    @Test
+    public void parkingPatrolPagesPrioritizeOperationalSurfaces() {
+        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") >= 76);
+        assertTrue((Integer) requiredSpec("parkingTaskRailHeightDp") >= 108);
+        assertTrue((Integer) requiredSpec("parkingVisionStageHeightDp") >= 280);
+        assertTrue((Integer) requiredSpec("parkingMapStageHeightDp") >= 300);
+        assertTrue((Integer) requiredSpec("parkingPatrolCheckpointCount") >= 5);
+    }
+
+    @Test
+    public void redesignedDriveUsesTactileButtonsAndAccessibleThemeControl() {
+        assertEquals(true, requiredSpec("driveUsesExplicitDirectionButtons"));
+        assertTrue((Integer) requiredSpec("parkingDriveButtonElevationDp") >= 4);
+        assertTrue((Integer) requiredSpec("parkingThemeToggleSizeDp") >= 44);
+        assertEquals("global_chrome", requiredSpec("parkingThemeControlPlacement"));
     }
 
     private Object requiredSpec(String methodName) {

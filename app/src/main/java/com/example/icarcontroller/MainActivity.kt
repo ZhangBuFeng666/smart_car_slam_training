@@ -2,13 +2,23 @@ package com.example.icarcontroller
 
 import android.app.Activity
 import android.app.Dialog
+import android.annotation.SuppressLint
+import android.content.res.ColorStateList
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -19,6 +29,7 @@ import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -39,14 +50,23 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private lateinit var pageContent: LinearLayout
     private lateinit var scrollContent: ScrollView
+    private lateinit var topBar: LinearLayout
+    private lateinit var bottomNav: LinearLayout
+    private lateinit var txtAppTitle: TextView
     private lateinit var txtStatusPill: TextView
+    private lateinit var globalThemeToggle: TextView
     private lateinit var navViews: Map<String, TextView>
+    private lateinit var parkingThemeStore: ParkingThemeStore
 
     private var hostInput: EditText? = null
     private var portInput: EditText? = null
     private var txtSpeed: TextView? = null
     private var txtDriveState: TextView? = null
     private var txtLog: TextView? = null
+    private var vehicleStage: Vehicle3DStageView? = null
+    private var parkingVisionView: ParkingVisionView? = null
+    private var homeConnectionText: TextView? = null
+    private var pageStatusText: TextView? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val commandExecutor = Executors.newSingleThreadExecutor()
@@ -62,6 +82,8 @@ class MainActivity : Activity() {
     private var currentDirection: String? = null
     private var currentMotionLabel = "待命"
     private var logText = "最近操作会显示在这里"
+    private var isVehicleConnected = false
+    private var parkingThemeMode = ParkingThemeMode.LIGHT
 
     private val repeatMoveRunnable = object : Runnable {
         override fun run() {
@@ -75,9 +97,24 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        parkingThemeStore = ParkingThemeStore(this)
+        parkingThemeMode = parkingThemeStore.load()
+
         pageContent = findViewById(R.id.pageContent)
         scrollContent = findViewById(R.id.scrollContent)
+        scrollContent.isVerticalScrollBarEnabled = false
+        topBar = findViewById(R.id.topBar)
+        bottomNav = findViewById(R.id.bottomNav)
+        txtAppTitle = findViewById(R.id.txtAppTitle)
         txtStatusPill = findViewById(R.id.txtStatusPill)
+        globalThemeToggle = findViewById(R.id.globalThemeToggle)
+        globalThemeToggle.setOnClickListener {
+            forceStopForExit(DriveExitEvent.THEME_CHANGE)
+            parkingThemeMode = ParkingThemeSpec.nextMode(parkingThemeMode)
+            parkingThemeStore.save(parkingThemeMode)
+            renderPage(selectedPage)
+        }
+        setPressFeedback(globalThemeToggle)
         scrollContent.clipToPadding = false
         pageContent.setPadding(
             pageContent.paddingLeft,
@@ -88,7 +125,7 @@ class MainActivity : Activity() {
         navViews = mapOf(
             "home" to findViewById(R.id.navHome),
             "drive" to findViewById(R.id.navDrive),
-            "tasks" to findViewById(R.id.navTasks),
+            "ai" to findViewById(R.id.navTasks),
             "vision" to findViewById(R.id.navVision),
             "nav" to findViewById(R.id.navNav)
         )
@@ -101,14 +138,30 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        vehicleStage?.destroy()
+        vehicleStage = null
         stopMove()
         commandExecutor.shutdownNow()
-        moveExecutor.shutdownNow()
-        stopExecutor.shutdownNow()
+        moveExecutor.shutdown()
+        stopExecutor.shutdown()
         super.onDestroy()
     }
 
+    override fun onResume() {
+        super.onResume()
+        vehicleStage?.onHostResume()
+        parkingVisionView?.setActive(true)
+    }
+
+    override fun onPause() {
+        forceStopForExit(DriveExitEvent.APP_PAUSE)
+        vehicleStage?.onHostPause()
+        parkingVisionView?.setActive(false)
+        super.onPause()
+    }
+
     private fun renderPage(key: String) {
+        forceStopForExit(DriveExitEvent.PAGE_CHANGE)
         saveConnectionInputs()
         selectedPage = key
         currentDirection = null
@@ -116,19 +169,25 @@ class MainActivity : Activity() {
         txtSpeed = null
         txtDriveState = null
         txtLog = null
+        vehicleStage?.destroy()
+        vehicleStage = null
+        parkingVisionView = null
+        homeConnectionText = null
+        pageStatusText = null
         hostInput = null
         portInput = null
 
         pageContent.removeAllViews()
+        updateChrome(key)
+        updateTopBar(key)
         updateNavigation()
 
         when (key) {
             "home" -> renderHome()
             "drive" -> renderDrive()
-            "tasks" -> renderTasks()
+            "ai" -> renderAiPage()
             "vision" -> renderVision()
             "nav" -> renderNavigation()
-            "ai" -> showAiAssistantSheet()
         }
 
         animatePageIn()
@@ -136,73 +195,115 @@ class MainActivity : Activity() {
     }
 
     private fun renderHome() {
-        pageContent.addView(deviceHomeCard())
-        pageContent.addView(homeActionRail())
-        pageContent.addView(capabilityRail())
+        pageContent.addView(digitalKeyStage())
     }
 
     private fun renderDrive() {
-        pageContent.addView(remoteConsole())
+        pageContent.addView(parkingPageHeader(
+            kicker = "B2 / MANUAL OVERRIDE",
+            title = "低速驾驶",
+            subtitle = "停车场低速操控，按住移动，松手立即刹停。",
+            status = "待连接"
+        ))
+        pageContent.addView(parkingDriveStatus())
+        pageContent.addView(parkingRemoteConsole())
         updateSpeedText()
-        pageContent.addView(logCard())
+        pageContent.addView(parkingActivityBar())
     }
 
-    private fun renderTasks() {
-        pageContent.addView(compactHero("任务模式", "把实训功能变成一键模式", "避障、跟随、警卫、视觉追踪"))
-
-        FeatureCatalog.trainingTasks().forEach { task ->
-            pageContent.addView(taskModeCard(task))
-        }
-
-        pageContent.addView(dangerButton("全部停止") {
-            currentDirection = null
-            mainHandler.removeCallbacks(repeatMoveRunnable)
-            sendGet(api().stopAllUrl(), "全部停止")
-        })
-        pageContent.addView(logCard())
+    private fun renderAiPage() {
+        pageContent.addView(parkingPageHeader(
+            kicker = "B2 / AI PATROL",
+            title = "安排巡逻",
+            subtitle = "用自然语言组合导航、避障、视觉复查与限制区警卫。",
+            status = "仅生成预览"
+        ))
+        pageContent.addView(parkingAiWorkspace())
+        pageContent.addView(parkingSafetyStrip())
     }
 
     private fun renderVision() {
-        pageContent.addView(compactHero("视觉实验室", "训练完成后接入识别、检测和追踪", "模型训练中"))
-
-        val preview = card()
-        preview.addView(sectionHeader("画面预览", "后续接入小车摄像头视频流"))
-        preview.addView(placeholderBox("视频流待接入"))
-        preview.addView(horizontalButtons(
-            primaryButton("启动相机") { sendGet(api().startTaskUrl("camera"), "启动相机") },
-            secondaryButton("HSV 调参") { sendGet(api().startTaskUrl("hsv"), "启动 HSV 调参") }
+        pageContent.addView(parkingPageHeader(
+            kicker = "B2 / VISION REVIEW",
+            title = "停车视觉",
+            subtitle = "识别车位编号、占用状态、车辆颜色和禁停标志。",
+            status = "模型训练中"
         ))
-        pageContent.addView(preview)
-
-        FeatureCatalog.visionFeatures().forEach { item ->
-            pageContent.addView(featureInfoCard(item))
-        }
-        pageContent.addView(logCard())
+        pageContent.addView(parkingVisionSurface())
+        pageContent.addView(parkingVisionSummary())
+        pageContent.addView(parkingVisionClassRail())
     }
 
     private fun renderNavigation() {
-        pageContent.addView(compactHero("地图与导航", "预留建图、路径规划和自动导航", "待接入"))
-
-        val mapCard = card()
-        mapCard.addView(sectionHeader("地图预览", "未来展示建图结果和目标点"))
-        mapCard.addView(placeholderBox("地图区域待接入"))
-        pageContent.addView(mapCard)
-
-        FeatureCatalog.navigationFeatures().forEach { item ->
-            pageContent.addView(featureInfoCard(item))
-        }
-
-        val safety = card()
-        safety.addView(sectionHeader("安全控制", "导航接入后仍保留人工介入"))
-        safety.addView(bodyText("导航功能接入后，仍会保留人工急停和全部停止。"))
-        safety.addView(dangerButton("全部停止") {
-            sendGet(api().stopAllUrl(), "全部停止")
-        })
-        pageContent.addView(safety)
+        pageContent.addView(parkingPageHeader(
+            kicker = "B2 / ROUTE CONTROL",
+            title = "路线导航",
+            subtitle = "生成停车场地图，规划巡逻路线，并按检查点执行自动导航。",
+            status = "SLAM / Nav2"
+        ))
+        pageContent.addView(parkingMapSurface())
+        pageContent.addView(parkingRouteStatus())
+        pageContent.addView(parkingNavigationDeck())
+        pageContent.addView(parkingSafetyStrip())
     }
 
-    private fun renderAiAssistant() {
-        showAiAssistantSheet()
+    private fun updateTopBar(key: String) {
+        val page = FeatureCatalog.primaryPages().firstOrNull { it.key == key }
+        txtAppTitle.text = "iCar · B2 停车场巡逻"
+        txtStatusPill.text = page?.subtitle ?: "准备连接小车"
+    }
+
+    private fun updateChrome(key: String) {
+        val home = key == "home"
+        topBar.visibility = View.VISIBLE
+        val palette = parkingPalette()
+        val useDarkChrome = parkingThemeMode == ParkingThemeMode.DARK
+        scrollContent.setBackgroundColor(color(palette.background))
+        window.statusBarColor = color(palette.background)
+        window.navigationBarColor = color(palette.surface)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val lightStatusFlag = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            window.decorView.systemUiVisibility = if (useDarkChrome) {
+                window.decorView.systemUiVisibility and lightStatusFlag.inv()
+            } else {
+                window.decorView.systemUiVisibility or lightStatusFlag
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val lightNavigationFlag = View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            window.decorView.systemUiVisibility = if (useDarkChrome) {
+                window.decorView.systemUiVisibility and lightNavigationFlag.inv()
+            } else {
+                window.decorView.systemUiVisibility or lightNavigationFlag
+            }
+        }
+        bottomNav.background = if (home && parkingThemeMode == ParkingThemeMode.DARK) {
+            resources.getDrawable(R.drawable.bottom_bar_dark_bg, theme)
+        } else {
+            roundedBackground(palette.surface, palette.border, 0)
+        }
+        topBar.background = ColorDrawable(color(palette.background))
+        txtAppTitle.setTextColor(color(palette.textSecondary))
+        txtStatusPill.setTextColor(color(palette.textSecondary))
+        attachGlobalThemeToggle(
+            topBar,
+            LinearLayout.LayoutParams(
+                dp(InteractionSpec.parkingThemeToggleSizeDp()),
+                dp(InteractionSpec.parkingThemeToggleSizeDp())
+            )
+        )
+        styleGlobalThemeToggle(palette)
+        pageContent.setPadding(
+            if (home) 0 else dp(12),
+            pageContent.paddingTop,
+            if (home) 0 else dp(12),
+            dp(if (home) InteractionSpec.obsidianBottomClearanceDp() else 18)
+        )
+        navViews["home"]?.text = "◆\n巡逻"
+        navViews["drive"]?.text = "◉\n驾驶"
+        navViews["ai"]?.text = "✦\nAI"
+        navViews["vision"]?.text = "◎\n视觉"
+        navViews["nav"]?.text = "⌖\n导航"
     }
 
     private fun showAiAssistantSheet() {
@@ -222,8 +323,8 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setMargins(0, 0, 0, dp(14))
         })
-        panel.addView(cardHeader("AI 智能助手", "预留"))
-        panel.addView(bodyText("把复杂任务拆成可确认的步骤。当前只生成预览，不直接控制小车。"), matchWrapParams(top = 8))
+        panel.addView(cardHeader("停车场任务助手", "预留"))
+        panel.addView(bodyText("把巡逻、避障、视觉复查和返回任务拆成可确认步骤。当前只生成预览，不直接控制小车。"), matchWrapParams(top = 8))
 
         val examplesScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -235,7 +336,7 @@ class MainActivity : Activity() {
         panel.addView(examplesScroll, matchWrapParams(top = 12))
 
         val input = EditText(this).apply {
-            hint = "例如：检查小车状态，并进入自动避障模式"
+            hint = "例如：巡检 B2 东区并复查禁停车辆"
             minLines = 3
             gravity = Gravity.TOP
             background = resources.getDrawable(R.drawable.input_bg, theme)
@@ -256,13 +357,13 @@ class MainActivity : Activity() {
             })
         }
         panel.addView(primaryButton("生成任务预览") {
-            val text = input.text.toString().ifBlank { "检查小车状态，并进入自动避障模式" }
+            val text = input.text.toString().ifBlank { "巡检 B2 东区并复查禁停车辆" }
             preview.text = "任务：$text"
             animateStepPreview(preview, listOf(
                 "1. 检查连接状态",
-                "2. 启动底盘驱动",
-                "3. 检查所需传感器",
-                "4. 等待用户确认后执行"
+                "2. 加载 B2 巡逻路线",
+                "3. 启动雷达避障与停车视觉",
+                "4. 标记异常并等待用户确认"
             ))
         })
 
@@ -283,6 +384,1492 @@ class MainActivity : Activity() {
                 }
             }
             panel.translationY = dp(380).toFloat()
+            panel.alpha = 0f
+            panel.animate()
+                .translationY(0f)
+                .alpha(1f)
+                .setDuration(InteractionSpec.sheetTransitionMillis().toLong())
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
+        dialog.show()
+    }
+
+    private fun digitalKeyStage(): FrameLayout {
+        val palette = parkingPalette()
+        val lightHome = parkingThemeMode == ParkingThemeMode.LIGHT
+        val stage = FrameLayout(this).apply {
+            background = if (lightHome) {
+                roundedBackground(palette.surface, palette.border, 8, palette.surfaceAlt)
+            } else {
+                resources.getDrawable(R.drawable.obsidian_stage_bg, theme)
+            }
+            setPadding(dp(20), dp(18), dp(20), dp(18))
+            layoutParams = matchWrapParams(bottom = 0).apply {
+                height = dp(600)
+                setMargins(dp(12), dp(10), dp(12), dp(12))
+            }
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "iCAR  X3"
+            setTextColor(color(palette.textPrimary))
+            textSize = 15f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, dp(30), 1f))
+        homeConnectionText = TextView(this).apply {
+            text = if (isVehicleConnected) "●  已连接" else "●  待检测"
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setTextColor(color(if (isVehicleConnected) "#4FE1B6" else palette.textSecondary))
+            textSize = 11f
+        }
+        header.addView(homeConnectionText, LinearLayout.LayoutParams(dp(100), dp(30)))
+        stage.addView(header, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32), Gravity.TOP))
+
+        val headline = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "B2 / PARKING PATROL"
+                setTextColor(color(palette.accentText))
+                textSize = 10f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "巡逻待命"
+                setTextColor(color(palette.textPrimary))
+                textSize = 30f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }, matchWrapParams(top = 3))
+            addView(TextView(this@MainActivity).apply {
+                text = "路线待配置 · 设备状态可检测"
+                setTextColor(color(palette.textSecondary))
+                textSize = 11f
+            }, matchWrapParams(top = 2))
+        }
+        stage.addView(headline, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(82),
+            Gravity.TOP
+        ).apply {
+            topMargin = dp(48)
+        })
+
+        vehicleStage = Vehicle3DStageView(this).apply {
+            setConnected(isVehicleConnected)
+            setThemeMode(parkingThemeMode)
+        }
+        stage.addView(vehicleStage, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(InteractionSpec.vehicleStageHeightDp() - 32),
+            Gravity.TOP
+        ).apply {
+            topMargin = dp(112)
+        })
+
+        val metrics = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        listOf(
+            "86" to "电量 %",
+            "00" to "异常",
+            "--" to "预计 min"
+        ).forEachIndexed { index, metric ->
+            metrics.addView(obsidianMetric(metric.first, metric.second), LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                if (index > 0) setMargins(dp(1), 0, 0, 0)
+            })
+        }
+        stage.addView(metrics, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58), Gravity.TOP).apply {
+            topMargin = dp(392)
+        })
+
+        val shortcuts = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        listOf(
+            "连接" to { showConnectionSheet() },
+            "驾驶" to { renderPage("drive") },
+            "避障" to { sendGet(api().startTaskUrl("avoidance"), "启动自动避障") },
+            "AI" to { renderPage("ai") }
+        ).forEachIndexed { index, item ->
+            shortcuts.addView(obsidianShortcut(item.first, item.second), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                if (index > 0) setMargins(dp(7), 0, 0, 0)
+            })
+        }
+        stage.addView(shortcuts, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40), Gravity.TOP).apply {
+            topMargin = dp(458)
+        })
+
+        val primary = TextView(this).apply {
+            text = "进入巡逻准备    →"
+            gravity = Gravity.CENTER
+            setTextColor(color(accentOnColor()))
+            textSize = 14f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            background = if (lightHome) {
+                tactileBackground(palette.accent, palette.accentSoft, palette.accent, 18)
+            } else {
+                resources.getDrawable(R.drawable.obsidian_primary_bg, theme)
+            }
+            isClickable = true
+            setOnClickListener { renderPage("nav") }
+            setPressFeedback(this)
+        }
+        stage.addView(primary, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(InteractionSpec.obsidianPrimaryHeightDp()),
+            Gravity.BOTTOM
+        ).apply {
+            bottomMargin = dp(2)
+        })
+
+        stage.alpha = 0f
+        stage.translationY = dp(14).toFloat()
+        stage.post {
+            stage.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(InteractionSpec.pageTransitionMillis().toLong())
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
+        return stage
+    }
+
+    private fun obsidianMetric(value: String, label: String): LinearLayout =
+        LinearLayout(this).apply {
+            val palette = parkingPalette()
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(TextView(this@MainActivity).apply {
+                text = value
+                gravity = Gravity.CENTER
+                setTextColor(color(palette.textPrimary))
+                textSize = 20f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(color(palette.textSecondary))
+                textSize = 9f
+            })
+        }
+
+    private fun obsidianShortcut(label: String, action: () -> Unit): TextView =
+        TextView(this).apply {
+            val palette = parkingPalette()
+            text = label
+            gravity = Gravity.CENTER
+            setTextColor(color(palette.textPrimary))
+            textSize = 11f
+            background = if (parkingThemeMode == ParkingThemeMode.LIGHT) {
+                tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 18)
+            } else {
+                resources.getDrawable(R.drawable.obsidian_action_bg, theme)
+            }
+            isClickable = true
+            setOnClickListener { action() }
+            setPressFeedback(this)
+        }
+
+    private fun keyStatusRail(): LinearLayout {
+        val rail = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = resources.getDrawable(R.drawable.connection_dock_bg, theme)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        rail.addView(keyStatusCell("连接", "待检测"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        rail.addView(keyStatusCell("底盘", "可启动"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+            setMargins(dp(6), 0, 0, 0)
+        })
+        rail.addView(keyStatusCell("急停", "可用"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+            setMargins(dp(6), 0, 0, 0)
+        })
+        return rail
+    }
+
+    private fun keyStatusCell(title: String, value: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(TextView(this@MainActivity).apply {
+                text = value
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                maxLines = 1
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                gravity = Gravity.CENTER
+                setTextColor(color("#DDF7F3"))
+                textSize = 10f
+                maxLines = 1
+            }, matchWrapParams(top = 1))
+        }
+
+    private fun keyFloatingAction(item: FeatureItem, emphasized: Boolean): LinearLayout {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = resources.getDrawable(if (emphasized) R.drawable.key_action_active_bg else R.drawable.key_action_bg, theme)
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            isClickable = true
+            setOnClickListener { handleKeyAction(item.key) }
+            setPressFeedback(this)
+        }
+        tile.addView(TextView(this).apply {
+            text = item.title
+            gravity = Gravity.CENTER
+            setTextColor(color(if (emphasized) "#FFFFFF" else "#141A1F"))
+            textSize = 17f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        tile.addView(TextView(this).apply {
+            text = item.description
+            gravity = Gravity.CENTER
+            setTextColor(color(if (emphasized) "#DDF7F3" else "#66706C"))
+            textSize = 11f
+            maxLines = 1
+        }, matchWrapParams(top = 3))
+        return tile
+    }
+
+    private fun handleKeyAction(key: String) {
+        when (key) {
+            "drive" -> renderPage("drive")
+            "base" -> sendGet(api().startTaskUrl("base"), "启动底盘驱动")
+            "avoidance" -> sendGet(api().startTaskUrl("avoidance"), "启动自动避障")
+            "nav" -> renderPage("nav")
+            "ai" -> renderPage("ai")
+        }
+    }
+
+    private fun keyPrimaryButton(text: String, action: () -> Unit): TextView =
+        keyTextButton(text, R.drawable.key_action_active_bg, Color.WHITE, action)
+
+    private fun keySecondaryButton(text: String, action: () -> Unit): TextView =
+        keyTextButton(text, R.drawable.key_action_bg, color("#141A1F"), action)
+
+    private fun keyTextButton(text: String, bg: Int, textColor: Int, action: () -> Unit): TextView =
+        TextView(this).apply {
+            this.text = text
+            gravity = Gravity.CENTER
+            setTextColor(textColor)
+            textSize = 15f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            background = resources.getDrawable(bg, theme)
+            isClickable = true
+            setOnClickListener { action() }
+            setPressFeedback(this)
+        }
+
+    private fun productModuleDock(): LinearLayout {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        dock.addView(sectionHeader("功能入口", "像车钥匙 App 一样，先选模式，再进入具体控制"))
+
+        val grid = GridLayout(this).apply {
+            columnCount = 2
+            rowCount = 2
+        }
+        listOf(
+            HomeAction("AI 巡逻", "避障、跟随、警卫", "AI") { renderPage("ai") },
+            HomeAction("视觉实验", "相机与模型结果", "视觉") { renderPage("vision") },
+            HomeAction("建图导航", "SLAM 与目标点", "导航") { renderPage("nav") },
+            HomeAction("AI 助手", "复杂任务预留", "预留") { renderPage("ai") }
+        ).forEach { action ->
+            grid.addView(moduleJumpTile(action), GridLayout.LayoutParams().apply {
+                width = 0
+                height = dp(InteractionSpec.modeTileHeightDp())
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                setMargins(dp(4), dp(8), dp(4), 0)
+            })
+        }
+        dock.addView(grid)
+        return dock
+    }
+
+    private fun moduleJumpTile(action: HomeAction): LinearLayout {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.mode_tile_product_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            setOnClickListener { action.onClick() }
+            setPressFeedback(this)
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(TextView(this).apply {
+            text = action.title
+            setTextColor(color("#141A1F"))
+            textSize = 16f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(chip(action.status))
+        tile.addView(top)
+        tile.addView(TextView(this).apply {
+            text = action.subtitle
+            setTextColor(color("#66706C"))
+            textSize = 12f
+            maxLines = 2
+        }, matchWrapParams(top = 8))
+        return tile
+    }
+
+    private fun productHero(title: String, subtitle: String, tag: String): LinearLayout {
+        val hero = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.key_stage_bg, theme)
+            setPadding(dp(16), dp(15), dp(16), dp(15))
+            layoutParams = matchWrapParams(bottom = 12)
+            elevation = dp(4).toFloat()
+        }
+        hero.addView(chipOnDark(tag))
+        hero.addView(TextView(this).apply {
+            text = title
+            setTextColor(Color.WHITE)
+            textSize = 25f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, matchWrapParams(top = 9))
+        hero.addView(TextView(this).apply {
+            text = subtitle
+            setTextColor(color("#E8F6F0"))
+            textSize = 13f
+            maxLines = 2
+        }, matchWrapParams(top = 5))
+        return hero
+    }
+
+    private fun driveKeyHeader(): LinearLayout =
+        productHero("驾驶舱", "按住方向移动，松手立即刹停。先低速试车，保持急停可触达。", "手动控制")
+
+    private fun parkingPageHeader(
+        kicker: String,
+        title: String,
+        subtitle: String,
+        status: String
+    ): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(6), dp(22), dp(6), dp(18))
+        layoutParams = matchWrapParams(bottom = 4)
+        val top = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(TextView(this@MainActivity).apply {
+            text = kicker
+            setTextColor(color(palette.accentText))
+            textSize = 10f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(parkingChip(status).also { pageStatusText = it })
+        addView(top)
+        addView(TextView(this@MainActivity).apply {
+            text = title
+            setTextColor(color(palette.textPrimary))
+            textSize = 31f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, matchWrapParams(top = 8))
+        addView(TextView(this@MainActivity).apply {
+            text = subtitle
+            setTextColor(color(palette.textSecondary))
+            textSize = 13f
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }, matchWrapParams(top = 5))
+    }
+
+    private fun parkingChip(text: String): TextView = TextView(this).apply {
+        val palette = parkingPalette()
+        this.text = text
+        setTextColor(color(palette.accentText))
+        textSize = 10f
+        gravity = Gravity.CENTER
+        background = roundedBackground(palette.accentSoft, palette.border, 14)
+        setPadding(dp(10), dp(5), dp(10), dp(5))
+        maxLines = 1
+        maxWidth = dp(132)
+        ellipsize = TextUtils.TruncateAt.END
+    }
+
+    private fun parkingDriveStatus(): LinearLayout = parkingMetricBand(listOf(
+        "0.00" to "m/s",
+        "待命" to "当前动作",
+        if (isVehicleConnected) "在线" to "HTTP" else "离线" to "HTTP"
+    ))
+
+    private fun parkingMetricBand(items: List<Pair<String, String>>): LinearLayout =
+        LinearLayout(this).apply {
+            val palette = parkingPalette()
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            background = roundedBackground(palette.surface, palette.border, 18)
+            setPadding(dp(6), dp(9), dp(6), dp(9))
+            layoutParams = matchWrapParams(bottom = 12)
+            items.forEachIndexed { index, item ->
+                val metric = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    addView(TextView(this@MainActivity).apply {
+                        text = item.first
+                        gravity = Gravity.CENTER
+                        setTextColor(color(palette.textPrimary))
+                        textSize = 18f
+                        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                    })
+                    addView(TextView(this@MainActivity).apply {
+                        text = item.second
+                        gravity = Gravity.CENTER
+                        setTextColor(color(palette.textSecondary))
+                        textSize = 10f
+                    }, matchWrapParams(top = 2))
+                }
+                addView(metric, LinearLayout.LayoutParams(0, dp(52), 1f))
+                if (index < items.lastIndex) {
+                    addView(View(this@MainActivity).apply {
+                        setBackgroundColor(color(palette.border))
+                    }, LinearLayout.LayoutParams(dp(1), dp(32)).apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                    })
+                }
+            }
+        }
+
+    private fun parkingRemoteConsole(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(palette.surface, palette.border, 22, palette.surfaceAlt)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
+        setPadding(dp(14), dp(14), dp(14), dp(14))
+        layoutParams = matchWrapParams(bottom = 12)
+
+        val top = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "低速控制"
+                setTextColor(color(palette.textPrimary))
+                textSize = 20f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "适用于车位与窄通道人工接管"
+                setTextColor(color(palette.textSecondary))
+                textSize = 11f
+            }, matchWrapParams(top = 2))
+        }
+        top.addView(titleColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(parkingOutlineButton("底盘") {
+            sendGet(api().startTaskUrl("base"), "启动底盘驱动")
+        }, LinearLayout.LayoutParams(dp(68), dp(42)))
+        top.addView(parkingDangerButton("急停") {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().emergencyStopUrl(), "急停")
+        }, LinearLayout.LayoutParams(dp(72), dp(42)).apply {
+            setMargins(dp(8), 0, 0, 0)
+        })
+        addView(top)
+
+        txtDriveState = TextView(this@MainActivity).apply {
+            text = "当前动作：$currentMotionLabel"
+            setTextColor(color(palette.accentText))
+            textSize = 15f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            background = roundedBackground(palette.accentSoft, palette.accent, 16)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+        addView(txtDriveState, matchWrapParams(top = 13))
+        addView(parkingSpeedDeck(), matchWrapParams(top = 13))
+        addView(parkingMovementGrid(), matchWrapParams(top = 10))
+    }
+
+    private fun parkingSpeedDeck(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        addView(parkingSectionTitle("速度限制", "停车场内建议保持慢速或标准档"))
+        val presets = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingSpeedButton("慢速", 5), LinearLayout.LayoutParams(0, dp(40), 1f))
+            addView(parkingSpeedButton("标准", 13), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                setMargins(dp(7), 0, 0, 0)
+            })
+            addView(parkingSpeedButton("快速", 23), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                setMargins(dp(7), 0, 0, 0)
+            })
+        }
+        addView(presets, matchWrapParams(top = 9))
+        txtSpeed = TextView(this@MainActivity).apply {
+            setTextColor(color(palette.textPrimary))
+            textSize = 12f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        addView(txtSpeed, matchWrapParams(top = 9))
+        addView(SeekBar(this@MainActivity).apply {
+            max = 30
+            progress = speedProgress
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    speedProgress = progress
+                    updateSpeedText()
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        })
+    }
+
+    private fun parkingSpeedButton(text: String, progress: Int): Button = Button(this).apply {
+        val palette = parkingPalette()
+        this.text = text
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(color(if (speedProgress == progress) palette.accentText else palette.textSecondary))
+        textSize = 12f
+        background = if (speedProgress == progress) {
+            tactileBackground(palette.accentSoft, palette.surface, palette.accent, 14)
+        } else {
+            tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 14)
+        }
+        setOnClickListener {
+            speedProgress = progress
+            renderPage("drive")
+        }
+    }
+
+    private fun parkingMovementGrid(): GridLayout = GridLayout(this).apply {
+        columnCount = 3
+        rowCount = 3
+        addParkingMoveButton(this, "↶\n左转", "turn_left")
+        addParkingMoveButton(this, "↑\n前进", "front")
+        addParkingMoveButton(this, "↷\n右转", "turn_right")
+        addParkingMoveButton(this, "←\n左移", "left")
+        addView(parkingStopButton(), parkingGridParams())
+        addParkingMoveButton(this, "→\n右移", "right")
+        addView(Space(this@MainActivity), parkingGridParams())
+        addParkingMoveButton(this, "↓\n后退", "back")
+        addView(Space(this@MainActivity), parkingGridParams())
+    }
+
+    private fun addParkingMoveButton(grid: GridLayout, text: String, direction: String) {
+        val button = Button(this).apply {
+            val palette = parkingPalette()
+            this.text = text
+            isAllCaps = false
+            includeFontPadding = false
+            minHeight = 0
+            minimumHeight = 0
+            gravity = Gravity.CENTER
+            textSize = 14f
+            setTextColor(color(palette.textPrimary))
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 20)
+            elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
+            stateListAnimator = null
+        }
+        setupHoldButton(button, direction)
+        grid.addView(button, parkingGridParams())
+    }
+
+    private fun parkingStopButton(): Button = Button(this).apply {
+        val palette = parkingPalette()
+        text = "■\n停止"
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setTextColor(color(accentOnColor()))
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.accent, palette.accentSoft, palette.accent, 20)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp() + 2).toFloat()
+        stateListAnimator = null
+        setOnClickListener { stopMove() }
+    }
+
+    private fun parkingGridParams(): GridLayout.LayoutParams = GridLayout.LayoutParams().apply {
+        width = 0
+        height = dp(InteractionSpec.parkingDriveControlSizeDp())
+        columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+        setMargins(dp(4), dp(4), dp(4), dp(4))
+    }
+
+    private fun parkingActivityBar(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        background = roundedBackground(palette.surface, palette.border, 16)
+        setPadding(dp(13), dp(11), dp(13), dp(11))
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(TextView(this@MainActivity).apply {
+            text = "最近操作"
+            setTextColor(color(palette.accentText))
+            textSize = 11f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        txtLog = TextView(this@MainActivity).apply {
+            text = logText.lineSequence().firstOrNull().orEmpty()
+            gravity = Gravity.END
+            maxLines = 1
+            setTextColor(color(palette.textSecondary))
+            textSize = 11f
+        }
+        addView(txtLog, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(dp(12), 0, 0, 0)
+        })
+        isClickable = true
+        setOnClickListener {
+            showProductSheet("操作记录", "最近的控制请求与返回结果", "LOG") { panel ->
+                panel.addView(bodyText(logText), matchWrapParams(top = 10))
+            }
+        }
+        setPressFeedback(this)
+    }
+
+    private fun parkingAiWorkspace(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+
+        val promptSurface = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(palette.surfaceAlt, palette.border, 22, palette.surface)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            addView(TextView(this@MainActivity).apply {
+                text = "✦  AI 巡逻助手"
+                setTextColor(color(palette.accentText))
+                textSize = 15f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "当前阶段只生成任务预览，不会直接控制小车。"
+                setTextColor(color(palette.textSecondary))
+                textSize = 10f
+            }, matchWrapParams(top = 4))
+        }
+
+        val input = EditText(this@MainActivity).apply {
+            hint = "描述本次停车场巡逻任务..."
+            minLines = 3
+            gravity = Gravity.TOP
+            setTextColor(color(palette.textPrimary))
+            setHintTextColor(color(palette.textSecondary))
+            background = roundedBackground(palette.surface, palette.border, 16)
+            setPadding(dp(12), dp(11), dp(12), dp(11))
+        }
+        promptSurface.addView(input, matchWrapParams(top = 12))
+
+        val examplesScroll = HorizontalScrollView(this@MainActivity).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val examples = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+        FeatureCatalog.aiExamples().forEach { example ->
+            examples.addView(TextView(this@MainActivity).apply {
+                text = example
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(color(palette.textPrimary))
+                textSize = 10f
+                background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 14)
+                setPadding(dp(11), dp(8), dp(11), dp(8))
+                isClickable = true
+                setOnClickListener {
+                    input.setText(example)
+                    input.setSelection(input.text.length)
+                }
+            }, LinearLayout.LayoutParams(dp(188), dp(54)).apply { setMargins(0, 0, dp(8), 0) })
+        }
+        examplesScroll.addView(examples)
+        promptSurface.addView(examplesScroll, matchWrapParams(top = 10))
+
+        addView(promptSurface, matchWrapParams(bottom = 18))
+        addView(parkingSectionTitle("任务预览", "确认步骤后再逐项接入真实服务"))
+
+        val timeline = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        val defaultSteps = listOf(
+            "01" to "检查底盘、雷达和相机连接",
+            "02" to "加载 B2 五点巡逻路线",
+            "03" to "启动通道避障与停车视觉",
+            "04" to "标记异常并等待人工复核"
+        )
+        defaultSteps.forEachIndexed { index, step ->
+            timeline.addView(parkingTimelineStep(step.first, step.second, index == 0))
+        }
+        addView(timeline, matchWrapParams(top = 10))
+
+        val actions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("清空") {
+                input.text.clear()
+            }, LinearLayout.LayoutParams(0, dp(50), 0.34f))
+            addView(parkingPrimaryButton("生成任务预览") {
+                val mission = input.text.toString().ifBlank { FeatureCatalog.aiExamples().first() }
+                input.setText(mission)
+                timeline.removeAllViews()
+                defaultSteps.forEachIndexed { index, step ->
+                    timeline.addView(parkingTimelineStep(step.first, step.second, index == 0))
+                }
+                setStatus("任务预览已生成")
+                appendLog("AI 任务预览：$mission")
+            }, LinearLayout.LayoutParams(0, dp(50), 0.66f).apply { setMargins(dp(9), 0, 0, 0) })
+        }
+        addView(actions, matchWrapParams(top = 14, bottom = 12))
+    }
+
+    private fun parkingTimelineStep(number: String, title: String, active: Boolean): LinearLayout =
+        LinearLayout(this).apply {
+            val palette = parkingPalette()
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+            addView(TextView(this@MainActivity).apply {
+                text = if (active) "✓" else number
+                gravity = Gravity.CENTER
+                setTextColor(color(if (active) accentOnColor() else palette.accentText))
+                textSize = 10f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                background = roundedBackground(if (active) palette.accent else palette.accentSoft, palette.accent, 20)
+            }, LinearLayout.LayoutParams(dp(34), dp(34)))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = title
+                    setTextColor(color(palette.textPrimary))
+                    textSize = 12f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = if (active) "已完成准备检查" else "等待用户确认"
+                    setTextColor(color(palette.textSecondary))
+                    textSize = 9f
+                }, matchWrapParams(top = 2))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(12), 0, 0, 0) })
+            addView(TextView(this@MainActivity).apply {
+                text = "›"
+                setTextColor(color(palette.accentText))
+                textSize = 20f
+            })
+        }
+
+    private fun parkingMissionSummary(): LinearLayout = parkingMetricBand(listOf(
+        "05" to "检查点",
+        "680m" to "计划路线",
+        "00" to "待复核"
+    ))
+
+    private fun parkingCheckpointRail(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("巡逻检查点", "横向浏览，点击进入对应能力"))
+        val scroll = HorizontalScrollView(this@MainActivity).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+        }
+        val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+        val checkpoints = listOf(
+            PatrolCheckpoint("A", "A区车位", "编号与占用", "camera", "视觉"),
+            PatrolCheckpoint("B", "主通道", "雷达避障", "avoidance", "雷达"),
+            PatrolCheckpoint("C", "禁停区域", "标志与车辆", null, "训练中"),
+            PatrolCheckpoint("D", "设备间", "限制区警卫", "warning", "警卫"),
+            PatrolCheckpoint("E", "环境点", "烟雾与气体", null, "待接入")
+        )
+        checkpoints.forEach { checkpoint ->
+            row.addView(parkingCheckpointTile(checkpoint), LinearLayout.LayoutParams(
+                dp(146), dp(InteractionSpec.parkingTaskRailHeightDp())
+            ).apply { setMargins(0, dp(10), dp(9), 0) })
+        }
+        scroll.addView(row)
+        addView(scroll)
+    }
+
+    private fun parkingCheckpointTile(checkpoint: PatrolCheckpoint): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.patrol_surface_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            addView(TextView(this@MainActivity).apply {
+                text = checkpoint.code
+                setTextColor(color("#C6B57B"))
+                textSize = 12f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = checkpoint.title
+                setTextColor(Color.WHITE)
+                textSize = 16f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }, matchWrapParams(top = 8))
+            addView(TextView(this@MainActivity).apply {
+                text = checkpoint.subtitle
+                setTextColor(color("#89938E"))
+                textSize = 11f
+            }, matchWrapParams(top = 3))
+            addView(Space(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
+            addView(parkingChip(checkpoint.status))
+            isClickable = true
+            setOnClickListener {
+                checkpoint.taskKey?.let { key ->
+                    sendGet(api().startTaskUrl(key), "启动${checkpoint.title}")
+                } ?: showProductSheet(checkpoint.title, checkpoint.subtitle, checkpoint.status) { panel ->
+                    panel.addView(disabledButton("能力接入后可在此启动"))
+                }
+            }
+            setPressFeedback(this)
+        }
+
+    private fun parkingServiceDeck(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = resources.getDrawable(R.drawable.patrol_surface_bg, theme)
+        setPadding(dp(13), dp(13), dp(13), dp(13))
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("基础服务", "按实训手册逐项启动，不自动跳过依赖"))
+        val grid = GridLayout(this@MainActivity).apply { columnCount = 2 }
+        listOf(
+            Triple("底盘驱动", "base", "启动底盘"),
+            Triple("激光雷达", "lidar", "启动雷达"),
+            Triple("Astra 相机", "camera", "启动相机"),
+            Triple("自动避障", "avoidance", "启动避障")
+        ).forEach { item ->
+            grid.addView(parkingOutlineButton(item.first) {
+                sendGet(api().startTaskUrl(item.second), item.third)
+            }, GridLayout.LayoutParams().apply {
+                width = 0
+                height = dp(52)
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                setMargins(dp(4), dp(8), dp(4), 0)
+            })
+        }
+        addView(grid)
+    }
+
+    private fun parkingSafetyStrip(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingDangerButton("急停") {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().emergencyStopUrl(), "急停")
+        }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        addView(parkingOutlineButton("全部停止") {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().stopAllUrl(), "全部停止")
+        }, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+            setMargins(dp(9), 0, 0, 0)
+        })
+    }
+
+    private fun parkingVisionSurface(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(ParkingVisionView(this@MainActivity).apply {
+            parkingVisionView = this
+            setPalette(palette)
+            elevation = dp(3).toFloat()
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(InteractionSpec.parkingVisionStageHeightDp())
+        ))
+        val actions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingPrimaryButton("启动相机") {
+                sendGet(api().startTaskUrl("camera"), "启动相机")
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(parkingOutlineButton("HSV 调参") {
+                sendGet(api().startTaskUrl("hsv"), "启动 HSV 调参")
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+                setMargins(dp(9), 0, 0, 0)
+            })
+        }
+        addView(actions, matchWrapParams(top = 9))
+    }
+
+    private fun parkingVisionSummary(): LinearLayout = parkingMetricBand(listOf(
+        "12" to "可见车位",
+        "07" to "已占用",
+        "01" to "禁停提示"
+    ))
+
+    private fun parkingVisionClassRail(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("识别类别", "当前为界面预览，模型结果接入后实时更新"))
+        val scroll = HorizontalScrollView(this@MainActivity).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("车位编号", "占用状态", "车辆颜色", "禁停标志", "行人", "烟雾").forEach { label ->
+            row.addView(parkingChip(label), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
+            ).apply { setMargins(0, dp(9), dp(8), 0) })
+        }
+        scroll.addView(row)
+        addView(scroll)
+    }
+
+    private fun parkingMapSurface(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        layoutParams = matchWrapParams(bottom = 12)
+        val map = ParkingMapView(this@MainActivity).apply {
+            setPalette(palette)
+            elevation = dp(3).toFloat()
+            setOnCheckpointSelectedListener { checkpoint ->
+                setStatus("已选择检查点 $checkpoint")
+                appendLog("路线图选择检查点 $checkpoint")
+            }
+        }
+        addView(map, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(InteractionSpec.parkingMapStageHeightDp())
+        ))
+        addView(TextView(this@MainActivity).apply {
+            text = "本地路线草图 · 接入 ROS 地图后替换为实时位姿"
+            setTextColor(color(palette.textSecondary))
+            textSize = 10f
+        }, matchWrapParams(top = 7))
+    }
+
+    private fun parkingRouteStatus(): LinearLayout = parkingMetricBand(listOf(
+        "05" to "检查点",
+        "12" to "车位",
+        "未开始" to "导航状态"
+    ))
+
+    private fun parkingNavigationDeck(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, dp(4), 0, 0)
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("导航工具", "先建图并校准位姿，再启动自动导航"))
+        val actions = listOf(
+            Triple("停车场建图", "SLAM · 启动 Gmapping", { sendGet(api().startTaskUrl("map_gmapping"), "启动建图") }),
+            Triple("显示建图地图", "查看当前扫描与闭环结果", { sendGet(api().startTaskUrl("map_display"), "显示建图地图") }),
+            Triple("保存停车场地图", "保存 pgm 与 yaml 地图文件", { sendGet(api().startTaskUrl("map_save"), "保存地图") }),
+            Triple("导航准备", "启动雷达、底盘与 Nav2", { sendGet(api().startTaskUrl("nav_laser"), "启动雷达与底盘") }),
+            Triple("目标点与路径规划", "发布初始位姿和目标点", { showParkingGoalSheet() })
+        )
+        actions.forEach { action ->
+            addView(parkingActionRow(action.first, action.second, action.third))
+        }
+        addView(parkingPrimaryButton("开始 B2 自动巡逻") {
+            sendGet(api().startTaskUrl("nav_dwa"), "启动 DWA 巡逻")
+        }, matchWrapParams(top = 12).apply { height = dp(54) })
+    }
+
+    private fun parkingActionRow(title: String, subtitle: String, action: () -> Unit): LinearLayout =
+        LinearLayout(this).apply {
+            val palette = parkingPalette()
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(12), dp(2), dp(12))
+            background = bottomBorderBackground(palette.border)
+            isClickable = true
+            setOnClickListener { action() }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = title
+                    setTextColor(color(palette.textPrimary))
+                    textSize = 13f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = subtitle
+                    setTextColor(color(palette.textSecondary))
+                    textSize = 9f
+                }, matchWrapParams(top = 2))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = "›"
+                setTextColor(color(palette.accentText))
+                textSize = 22f
+            })
+            setPressFeedback(this)
+        }
+
+    private fun showParkingGoalSheet() {
+        showProductSheet("导航目标", "发布初始位姿后，再发送停车场目标点。", "Nav2") { panel ->
+            val initX = poseInput("0", "x")
+            val initY = poseInput("0", "y")
+            val initYaw = poseInput("0", "yaw")
+            panel.addView(poseInputRow("初始位姿", initX, initY, initYaw), matchWrapParams(top = 10))
+            panel.addView(secondaryButton("发布初始位姿") {
+                sendGet(
+                    api().navigationInitialPoseUrl(readPose(initX), readPose(initY), readPose(initYaw)),
+                    "发布初始位姿"
+                )
+            })
+            val goalX = poseInput("1", "x")
+            val goalY = poseInput("0", "y")
+            val goalYaw = poseInput("0", "yaw")
+            panel.addView(poseInputRow("目标点", goalX, goalY, goalYaw), matchWrapParams(top = 12))
+            panel.addView(primaryButton("发送目标点") {
+                sendGet(
+                    api().navigationGoalUrl(readPose(goalX), readPose(goalY), readPose(goalYaw)),
+                    "发送导航目标"
+                )
+            })
+        }
+    }
+
+    private fun parkingSectionTitle(title: String, subtitle: String): LinearLayout =
+        LinearLayout(this).apply {
+            val palette = parkingPalette()
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                setTextColor(color(palette.textPrimary))
+                textSize = 15f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = subtitle
+                setTextColor(color(palette.textSecondary))
+                textSize = 10f
+            }, matchWrapParams(top = 2))
+        }
+
+    private fun parkingOutlineButton(text: String, action: () -> Unit): Button = Button(this).apply {
+        val palette = parkingPalette()
+        this.text = text
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(color(palette.textPrimary))
+        textSize = 12f
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 16)
+        elevation = dp(2).toFloat()
+        stateListAnimator = null
+        setOnClickListener { action() }
+    }
+
+    private fun parkingPrimaryButton(text: String, action: () -> Unit): Button = Button(this).apply {
+        val palette = parkingPalette()
+        this.text = text
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(color(accentOnColor()))
+        textSize = 12f
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.accent, palette.accentSoft, palette.accent, 16)
+        elevation = dp(3).toFloat()
+        stateListAnimator = null
+        setOnClickListener { action() }
+    }
+
+    private fun parkingDangerButton(text: String, action: () -> Unit): Button = Button(this).apply {
+        val palette = parkingPalette()
+        this.text = text
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(Color.WHITE)
+        textSize = 12f
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.danger, palette.surfaceAlt, palette.danger, 16)
+        elevation = dp(2).toFloat()
+        stateListAnimator = null
+        setOnClickListener { action() }
+    }
+
+    private fun taskModeGallery(): LinearLayout {
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        shell.addView(sectionHeader("选择模式", "点击模式进入详情，不在首页堆满说明"))
+        val grid = GridLayout(this).apply {
+            columnCount = 2
+        }
+        FeatureCatalog.trainingTasks().forEach { task ->
+            grid.addView(taskLaunchTile(task), GridLayout.LayoutParams().apply {
+                width = 0
+                height = dp(InteractionSpec.modeTileHeightDp())
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                setMargins(dp(4), dp(8), dp(4), 0)
+            })
+        }
+        shell.addView(grid)
+        return shell
+    }
+
+    private fun taskLaunchTile(task: RobotTask): LinearLayout {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.mode_tile_product_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            setOnClickListener { showTaskSheet(task) }
+            setPressFeedback(this)
+        }
+        tile.addView(TextView(this).apply {
+            text = task.title
+            setTextColor(color("#141A1F"))
+            textSize = 16f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        tile.addView(TextView(this).apply {
+            text = task.description
+            setTextColor(color("#66706C"))
+            textSize = 12f
+            maxLines = 2
+        }, matchWrapParams(top = 6))
+        tile.addView(Space(this), LinearLayout.LayoutParams(1, 0, 1f))
+        tile.addView(chip(task.category))
+        return tile
+    }
+
+    private fun showTaskSheet(task: RobotTask) {
+        showProductSheet(task.title, task.description, task.category) { panel ->
+            panel.addView(horizontalButtons(
+                primaryButton("启动${task.title}") { sendGet(api().startTaskUrl(task.key), "启动${task.title}") },
+                secondaryButton("停止") { sendGet(api().stopTaskUrl(task.key), "停止${task.title}") }
+            ))
+            panel.addView(dangerButton("急停") { sendGet(api().emergencyStopUrl(), "急停") })
+        }
+    }
+
+    private fun visionPreviewSurface(): FrameLayout {
+        val surface = FrameLayout(this).apply {
+            background = resources.getDrawable(R.drawable.map_surface_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12).apply {
+                height = dp(232)
+            }
+        }
+        surface.addView(TextView(this).apply {
+            text = "CAMERA"
+            setTextColor(color("#9AA59D"))
+            textSize = 12f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+        surface.addView(TextView(this).apply {
+            text = "视频流待接入"
+            gravity = Gravity.CENTER
+            setTextColor(color("#141A1F"))
+            textSize = 22f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        actions.addView(keyPrimaryButton("启动相机") { sendGet(api().startTaskUrl("camera"), "启动相机") }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(keySecondaryButton("HSV 调参") { sendGet(api().startTaskUrl("hsv"), "启动 HSV 调参") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+            setMargins(dp(10), 0, 0, 0)
+        })
+        surface.addView(actions, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), Gravity.BOTTOM))
+        return surface
+    }
+
+    private fun visionFeatureDock(): LinearLayout {
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        shell.addView(sectionHeader("视觉能力", "训练完成后逐项接入，不伪造实时结果"))
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        FeatureCatalog.visionFeatures().forEach { item ->
+            row.addView(featureLaunchTile(item), LinearLayout.LayoutParams(dp(158), dp(116)).apply {
+                setMargins(0, dp(10), dp(10), 0)
+            })
+        }
+        scroll.addView(row)
+        shell.addView(scroll)
+        return shell
+    }
+
+    private fun featureLaunchTile(item: FeatureItem): LinearLayout {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.mode_tile_product_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            setOnClickListener { showFeatureSheet(item) }
+            setPressFeedback(this)
+        }
+        tile.addView(chip(item.status))
+        tile.addView(TextView(this).apply {
+            text = item.title
+            setTextColor(color("#141A1F"))
+            textSize = 16f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, matchWrapParams(top = 10))
+        tile.addView(TextView(this).apply {
+            text = item.description
+            setTextColor(color("#66706C"))
+            textSize = 12f
+            maxLines = 2
+        }, matchWrapParams(top = 5))
+        return tile
+    }
+
+    private fun showFeatureSheet(item: FeatureItem) {
+        showProductSheet(item.title, item.description, item.status) { panel ->
+            panel.addView(disabledButton("等待模型或视频流接入"))
+            panel.addView(secondaryButton("返回视觉页") { renderPage("vision") })
+        }
+    }
+
+    private fun mapPreviewSurface(): FrameLayout {
+        val surface = FrameLayout(this).apply {
+            background = resources.getDrawable(R.drawable.map_surface_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12).apply {
+                height = dp(238)
+            }
+        }
+        surface.addView(TextView(this).apply {
+            text = "MAP CANVAS"
+            setTextColor(color("#8F9A93"))
+            textSize = 12f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+        surface.addView(TextView(this).apply {
+            text = "地图画布等待接入"
+            gravity = Gravity.CENTER
+            setTextColor(color("#141A1F"))
+            textSize = 21f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        actions.addView(keyPrimaryButton("启动建图") { sendGet(api().startTaskUrl("map_gmapping"), "启动建图") }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actions.addView(keySecondaryButton("进入驾驶") { renderPage("drive") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+            setMargins(dp(10), 0, 0, 0)
+        })
+        surface.addView(actions, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), Gravity.BOTTOM))
+        return surface
+    }
+
+    private fun navigationTimeline(title: String, subtitle: String, tasks: List<RobotTask>): LinearLayout {
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        shell.addView(sectionHeader(title, subtitle))
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tasks.forEachIndexed { index, task ->
+            row.addView(navigationStepPill(index + 1, task), LinearLayout.LayoutParams(dp(150), dp(108)).apply {
+                setMargins(0, dp(10), dp(10), 0)
+            })
+        }
+        scroll.addView(row)
+        shell.addView(scroll)
+        return shell
+    }
+
+    private fun navigationStepPill(step: Int, task: RobotTask): LinearLayout {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.mode_tile_product_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            setOnClickListener { showNavigationTaskSheet(step, task) }
+            setPressFeedback(this)
+        }
+        tile.addView(TextView(this).apply {
+            text = "0$step"
+            setTextColor(color("#0F766E"))
+            textSize = 12f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        tile.addView(TextView(this).apply {
+            text = task.title
+            setTextColor(color("#141A1F"))
+            textSize = 16f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            maxLines = 1
+        }, matchWrapParams(top = 7))
+        tile.addView(TextView(this).apply {
+            text = task.description
+            setTextColor(color("#66706C"))
+            textSize = 11f
+            maxLines = 2
+        }, matchWrapParams(top = 5))
+        return tile
+    }
+
+    private fun showNavigationTaskSheet(step: Int, task: RobotTask) {
+        showProductSheet("步骤 $step · ${task.title}", task.description, task.category) { panel ->
+            panel.addView(horizontalButtons(
+                primaryButton("启动") { sendGet(api().startTaskUrl(task.key), "启动${task.title}") },
+                secondaryButton("停止") { sendGet(api().stopTaskUrl(task.key), "停止${task.title}") }
+            ))
+            panel.addView(secondaryButton("查看驾驶页") { renderPage("drive") })
+        }
+    }
+
+    private fun actionSafetyStrip(): LinearLayout {
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        strip.addView(dangerButton("急停") {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().emergencyStopUrl(), "急停")
+        }, LinearLayout.LayoutParams(0, dp(46), 1f))
+        strip.addView(secondaryButton("全部停止") {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().stopAllUrl(), "全部停止")
+        }, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            setMargins(dp(10), 0, 0, 0)
+        })
+        return strip
+    }
+
+    private fun compactActivityLog(): LinearLayout {
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.product_panel_bg, theme)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            layoutParams = matchWrapParams(bottom = 12)
+        }
+        panel.addView(cardHeader("最近操作", "日志"))
+        txtLog = bodyText(logText).apply {
+            setTextColor(color("#334E68"))
+            maxLines = 5
+        }
+        panel.addView(txtLog, matchWrapParams(top = 8))
+        return panel
+    }
+
+    private fun showConnectionSheet() {
+        showProductSheet("连接小车", "输入小车端 Python 服务地址。保存后可以直接检测连接。", "HTTP") { panel ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            hostInput = EditText(this).apply {
+                setText(currentHost)
+                hint = "小车 IP"
+                setSingleLine(true)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                background = resources.getDrawable(R.drawable.input_bg, theme)
+                setTextColor(color("#102A43"))
+                setHintTextColor(color("#829AB1"))
+                setPadding(dp(12), 0, dp(12), 0)
+            }
+            portInput = EditText(this).apply {
+                setText(currentPort.toString())
+                hint = "端口"
+                setSingleLine(true)
+                inputType = InputType.TYPE_CLASS_NUMBER
+                background = resources.getDrawable(R.drawable.input_bg, theme)
+                setTextColor(color("#102A43"))
+                setHintTextColor(color("#829AB1"))
+                setPadding(dp(12), 0, dp(12), 0)
+            }
+            row.addView(hostInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+            row.addView(portInput, LinearLayout.LayoutParams(dp(86), dp(48)).apply {
+                setMargins(dp(8), 0, 0, 0)
+            })
+            panel.addView(row, matchWrapParams(top = 12))
+            panel.addView(horizontalButtons(
+                primaryButton("保存并检测") { sendGet(api().healthUrl(), "检测连接") },
+                secondaryButton("刷新状态") { sendGet(api().statusUrl(), "刷新状态") }
+            ))
+            panel.addView(dangerButton("全部停止") { sendGet(api().stopAllUrl(), "全部停止") })
+        }
+    }
+
+    private fun showProductSheet(
+        title: String,
+        subtitle: String,
+        status: String,
+        content: (LinearLayout) -> Unit
+    ) {
+        val themedParkingPage = selectedPage != "home"
+        val palette = parkingPalette()
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setCanceledOnTouchOutside(true)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = if (themedParkingPage) {
+                roundedBackground(palette.surface, palette.border, 24)
+            } else {
+                resources.getDrawable(R.drawable.sheet_bg, theme)
+            }
+            setPadding(dp(18), dp(10), dp(18), dp(18))
+        }
+        val handle = View(this).apply {
+            background = if (themedParkingPage) {
+                roundedBackground(palette.border, palette.border, 4)
+            } else {
+                resources.getDrawable(R.drawable.thin_handle_bg, theme)
+            }
+        }
+        panel.addView(handle, LinearLayout.LayoutParams(dp(42), dp(5)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setMargins(0, 0, 0, dp(14))
+        })
+        panel.addView(cardHeader(title, status))
+        panel.addView(bodyText(subtitle), matchWrapParams(top = 8))
+        content(panel)
+        dialog.setContentView(panel)
+        dialog.setOnShowListener {
+            dialog.window?.apply {
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+                setGravity(Gravity.BOTTOM)
+                addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                attributes = attributes.apply {
+                    width = WindowManager.LayoutParams.MATCH_PARENT
+                    dimAmount = 0.30f
+                }
+            }
+            panel.translationY = dp(InteractionSpec.sheetPeekHeightDp()).toFloat()
             panel.alpha = 0f
             panel.animate()
                 .translationY(0f)
@@ -351,7 +1938,7 @@ class MainActivity : Activity() {
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         actions.addView(primaryButton(ProductCopy.primaryAction()) { renderPage("drive") }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        actions.addView(secondaryHeroButton("AI 助手") { showAiAssistantSheet() }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+        actions.addView(secondaryHeroButton("AI 助手") { renderPage("ai") }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
             setMargins(dp(10), 0, 0, 0)
         })
         card.addView(actions, matchWrapParams(top = 16))
@@ -372,7 +1959,7 @@ class MainActivity : Activity() {
         listOf(
             HomeAction("驾驶", "进入遥控器", "可用") { renderPage("drive") },
             HomeAction("自动避障", "一键启动", "可用") { sendGet(api().startTaskUrl("avoidance"), "启动自动避障") },
-            HomeAction("AI 助手", "任务拆解", "规划中") { showAiAssistantSheet() },
+            HomeAction("AI 助手", "任务拆解", "规划中") { renderPage("ai") },
             HomeAction("视觉", "识别检测", "训练中") { renderPage("vision") }
         ).forEach { action ->
             row.addView(largeActionTile(action), LinearLayout.LayoutParams(dp(156), dp(110)).apply {
@@ -409,7 +1996,7 @@ class MainActivity : Activity() {
     private fun remoteConsole(): LinearLayout {
         val console = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = resources.getDrawable(R.drawable.remote_console_bg, theme)
+            background = resources.getDrawable(R.drawable.cockpit_bg, theme)
             setPadding(dp(16), dp(16), dp(16), dp(16))
             elevation = dp(8).toFloat()
             layoutParams = matchWrapParams(bottom = 12)
@@ -421,14 +2008,14 @@ class MainActivity : Activity() {
         }
         val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         copy.addView(TextView(this).apply {
-            text = "遥控器"
-            setTextColor(color("#102A43"))
+            text = "运动控制"
+            setTextColor(color("#141A1F"))
             textSize = 22f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         })
         copy.addView(TextView(this).apply {
-            text = "按住移动，松手刹停"
-            setTextColor(color("#627D98"))
+            text = "低延迟连续发送 · 松手刹停"
+            setTextColor(color("#66706C"))
             textSize = 13f
             maxLines = 1
         }, matchWrapParams(top = 3))
@@ -667,6 +2254,131 @@ class MainActivity : Activity() {
         return card
     }
 
+    private fun navigationOverviewCard(): LinearLayout {
+        val card = card().apply {
+            background = resources.getDrawable(R.drawable.remote_console_bg, theme)
+        }
+        card.addView(sectionHeader("实验理解", "APP 负责下发流程命令，ROS 负责建图、规划和控制"))
+        card.addView(statusRow("建图", "Gmapping 根据雷达扫描和里程计逐步生成栅格地图", "m1/m2/m4"))
+        card.addView(statusRow("路径规划", "Nav2 收到目标点后由 planner_server 计算从当前位置到目标点的路线", "Nav2"))
+        card.addView(statusRow("自动导航", "controller_server 使用 DWA 或 TEB 生成速度指令跟随路线", "DWA/TEB"))
+        return card
+    }
+
+    private fun navigationWorkflowCard(title: String, subtitle: String, tasks: List<RobotTask>): LinearLayout {
+        val card = card()
+        card.addView(sectionHeader(title, subtitle))
+        tasks.forEachIndexed { index, task ->
+            card.addView(navigationTaskRow(index + 1, task))
+        }
+        return card
+    }
+
+    private fun navigationTaskRow(step: Int, task: RobotTask): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = resources.getDrawable(R.drawable.feature_card_bg, theme)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            layoutParams = matchWrapParams(top = 10)
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        top.addView(modeBadge(step.toString()), LinearLayout.LayoutParams(dp(44), dp(44)))
+        val textCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        textCol.addView(TextView(this).apply {
+            text = task.title
+            setTextColor(color("#102A43"))
+            textSize = 16f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        })
+        textCol.addView(TextView(this).apply {
+            text = task.description
+            setTextColor(color("#627D98"))
+            textSize = 12f
+            maxLines = 2
+        }, matchWrapParams(top = 3))
+        top.addView(textCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(dp(10), 0, 0, 0)
+        })
+        top.addView(chip(task.category))
+        row.addView(top)
+        row.addView(horizontalButtons(
+            primaryButton("启动") { sendGet(api().startTaskUrl(task.key), "启动${task.title}") },
+            secondaryButton("停止") { sendGet(api().stopTaskUrl(task.key), "停止${task.title}") }
+        ))
+        return row
+    }
+
+    private fun navigationPoseCard(): LinearLayout {
+        val card = card()
+        card.addView(sectionHeader("目标点与路径规划", "先发布初始位姿，再发送目标点。目标点发出后 Nav2 会自动规划路径并执行导航。"))
+
+        val initX = poseInput("0", "x")
+        val initY = poseInput("0", "y")
+        val initYaw = poseInput("0", "yaw")
+        card.addView(poseInputRow("初始位姿", initX, initY, initYaw), matchWrapParams(top = 10))
+        card.addView(primaryButton("发布初始位姿") {
+            sendGet(
+                api().navigationInitialPoseUrl(readPose(initX), readPose(initY), readPose(initYaw)),
+                "发布初始位姿"
+            )
+        })
+
+        val goalX = poseInput("1", "x")
+        val goalY = poseInput("0", "y")
+        val goalYaw = poseInput("0", "yaw")
+        card.addView(poseInputRow("目标点", goalX, goalY, goalYaw), matchWrapParams(top = 14))
+        card.addView(horizontalButtons(
+            primaryButton("发送目标点") {
+                sendGet(api().navigationGoalUrl(readPose(goalX), readPose(goalY), readPose(goalYaw)), "发送导航目标")
+            },
+            secondaryButton("用 RViz 校准") {
+                setStatus("请在 RViz 用 2D Pose Estimate 校准位姿")
+                appendLog("提示\n手册要求先在 RViz 校准初始位姿，使雷达点云与地图轮廓重合。")
+            }
+        ))
+        return card
+    }
+
+    private fun poseInputRow(label: String, x: EditText, y: EditText, yaw: EditText): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        row.addView(sectionTitle(label))
+        val inputs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        inputs.addView(x, LinearLayout.LayoutParams(0, dp(46), 1f))
+        inputs.addView(y, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            setMargins(dp(8), 0, 0, 0)
+        })
+        inputs.addView(yaw, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            setMargins(dp(8), 0, 0, 0)
+        })
+        row.addView(inputs, matchWrapParams(top = 8))
+        return row
+    }
+
+    private fun poseInput(defaultValue: String, hintText: String): EditText =
+        EditText(this).apply {
+            val palette = parkingPalette()
+            val themed = selectedPage != "home"
+            setText(defaultValue)
+            hint = hintText
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
+            background = if (themed) roundedBackground(palette.surfaceAlt, palette.border, 12) else resources.getDrawable(R.drawable.input_bg, theme)
+            setTextColor(color(if (themed) palette.textPrimary else "#102A43"))
+            setHintTextColor(color(if (themed) palette.textSecondary else "#829AB1"))
+            textSize = 14f
+            setPadding(dp(10), 0, dp(10), 0)
+        }
+
+    private fun readPose(input: EditText): Double =
+        input.text?.toString()?.trim()?.toDoubleOrNull() ?: 0.0
+
     private fun sectionHeader(title: String, subtitle: String): LinearLayout {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -855,7 +2567,17 @@ class MainActivity : Activity() {
         grid.addView(button, gridParams())
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun setupHoldButton(button: Button, direction: String) {
+        button.isFocusable = true
+        button.contentDescription = "${directionLabel(direction).removeSuffix("中")}，按住持续移动"
+        button.setOnClickListener {
+            if (currentDirection != null) return@setOnClickListener
+            startMove(direction)
+            mainHandler.postDelayed({
+                if (currentDirection == direction) stopMove()
+            }, 320L)
+        }
         button.setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -900,7 +2622,23 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(repeatMoveRunnable)
         val url = api().moveUrl("stop", currentSpeed(), currentTurn())
         setStatus("停止指令已发送")
-        sendGet(url, "停止移动", quiet = true, executorService = stopExecutor)
+        DriveSafetySpec.stopDispatchLanes().forEach { lane ->
+            sendGet(
+                url,
+                "停止移动",
+                quiet = true,
+                executorService = when (lane) {
+                    StopDispatchLane.URGENT -> stopExecutor
+                    StopDispatchLane.MOVE_BARRIER -> moveExecutor
+                }
+            )
+        }
+    }
+
+    private fun forceStopForExit(event: DriveExitEvent) {
+        if (DriveSafetySpec.shouldStop(currentDirection, event)) {
+            stopMove()
+        }
     }
 
     private fun sendMove(direction: String, quiet: Boolean) {
@@ -953,6 +2691,7 @@ class MainActivity : Activity() {
 
             runOnUiThread {
                 if (!quiet) {
+                    updateVehicleConnection(result.startsWith("HTTP "))
                     setStatus("$label $result")
                     appendLog("$label\n$result")
                 }
@@ -1016,6 +2755,21 @@ class MainActivity : Activity() {
 
     private fun setStatus(text: String) {
         txtStatusPill.text = text
+        pageStatusText?.text = when {
+            text.contains("失败") -> "操作失败"
+            text.contains("请求中") -> "执行中"
+            text.contains("HTTP 2") -> "已完成"
+            else -> text.substringBefore(" HTTP").take(12)
+        }
+    }
+
+    private fun updateVehicleConnection(connected: Boolean) {
+        isVehicleConnected = connected
+        vehicleStage?.setConnected(connected)
+        homeConnectionText?.apply {
+            text = if (connected) "●  已连接" else "●  连接失败"
+            setTextColor(color(if (connected) "#4FE1B6" else "#E16B64"))
+        }
     }
 
     private fun appendLog(message: String) {
@@ -1025,13 +2779,32 @@ class MainActivity : Activity() {
     }
 
     private fun updateNavigation() {
+        val home = selectedPage == "home"
+        val palette = parkingPalette()
+        val darkChrome = parkingThemeMode == ParkingThemeMode.DARK
         navViews.forEach { (key, view) ->
             val selected = key == selectedPage
-            view.background = resources.getDrawable(
-                if (selected) R.drawable.nav_selected_bg else R.drawable.nav_plain_bg,
-                theme
-            )
-            view.setTextColor(color(if (selected) "#0F766E" else "#627D98"))
+            view.background = if (home && parkingThemeMode == ParkingThemeMode.DARK) {
+                resources.getDrawable(
+                    if (selected) R.drawable.nav_dark_selected_bg else R.drawable.nav_plain_bg,
+                    theme
+                )
+            } else if (selected) {
+                roundedBackground(
+                    palette.accentSoft,
+                    palette.border,
+                    15
+                )
+            } else {
+                ColorDrawable(Color.TRANSPARENT)
+            }
+            view.setTextColor(color(
+                if (selected) {
+                    if (home && parkingThemeMode == ParkingThemeMode.DARK) "#C6B57B" else palette.accentText
+                } else {
+                    if (darkChrome) "#7D8882" else palette.textSecondary
+                }
+            ))
             view.setTypeface(Typeface.DEFAULT, if (selected) Typeface.BOLD else Typeface.NORMAL)
             view.animate()
                 .scaleX(if (selected) InteractionSpec.navSelectionScale() else 1f)
@@ -1196,11 +2969,12 @@ class MainActivity : Activity() {
 
     private fun cardHeader(title: String, chipText: String): LinearLayout =
         LinearLayout(this).apply {
+            val palette = parkingPalette()
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(this@MainActivity).apply {
                 text = title
-                setTextColor(color("#102A43"))
+                setTextColor(color(if (selectedPage == "home") "#102A43" else palette.textPrimary))
                 textSize = 17f
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -1209,30 +2983,37 @@ class MainActivity : Activity() {
 
     private fun sectionTitle(text: String): TextView =
         TextView(this).apply {
+            val palette = parkingPalette()
             this.text = text
-            setTextColor(color("#102A43"))
+            setTextColor(color(if (selectedPage == "home") "#102A43" else palette.textPrimary))
             textSize = 18f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         }
 
     private fun bodyText(text: String): TextView =
         TextView(this).apply {
+            val palette = parkingPalette()
             this.text = text
-            setTextColor(color("#627D98"))
+            setTextColor(color(if (selectedPage == "home") "#627D98" else palette.textSecondary))
             textSize = 14f
             setLineSpacing(dp(2).toFloat(), 1.0f)
         }
 
     private fun chip(text: String): TextView =
         TextView(this).apply {
+            val palette = parkingPalette()
             this.text = text
-            setTextColor(color(if (text.contains("可用") || text.contains("基础") || text.contains("实训")) "#166534" else "#92400E"))
+            setTextColor(color(if (selectedPage == "home") {
+                if (text.contains("可用") || text.contains("基础") || text.contains("实训")) "#166534" else "#92400E"
+            } else palette.accentText))
             textSize = 12f
             gravity = Gravity.CENTER
-            background = resources.getDrawable(
-                if (text.contains("可用") || text.contains("基础") || text.contains("实训")) R.drawable.chip_ready_bg else R.drawable.chip_wait_bg,
-                theme
-            )
+            background = if (selectedPage == "home") {
+                resources.getDrawable(
+                    if (text.contains("可用") || text.contains("基础") || text.contains("实训")) R.drawable.chip_ready_bg else R.drawable.chip_wait_bg,
+                    theme
+                )
+            } else roundedBackground(palette.accentSoft, palette.border, 14)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
 
@@ -1259,13 +3040,16 @@ class MainActivity : Activity() {
     }
 
     private fun primaryButton(text: String, action: () -> Unit): Button =
-        styledButton(text, R.drawable.button_primary, Color.WHITE, action)
+        if (selectedPage == "home") styledButton(text, R.drawable.button_primary, Color.WHITE, action)
+        else parkingPrimaryButton(text, action)
 
     private fun secondaryButton(text: String, action: () -> Unit): Button =
-        styledButton(text, R.drawable.button_secondary, color("#102A43"), action)
+        if (selectedPage == "home") styledButton(text, R.drawable.button_secondary, color("#102A43"), action)
+        else parkingOutlineButton(text, action)
 
     private fun dangerButton(text: String, action: () -> Unit): Button =
-        styledButton(text, R.drawable.button_danger, Color.WHITE, action)
+        if (selectedPage == "home") styledButton(text, R.drawable.button_danger, Color.WHITE, action)
+        else parkingDangerButton(text, action)
 
     private fun moveButton(text: String): Button =
         styledButton(text, R.drawable.button_move, Color.WHITE) {}.apply {
@@ -1323,6 +3107,84 @@ class MainActivity : Activity() {
             setMargins(dp(5), dp(5), dp(5), dp(5))
         }
 
+    private fun parkingPalette(): ParkingPalette = ParkingThemeSpec.palette(parkingThemeMode)
+
+    private fun accentOnColor(): String = if (parkingThemeMode == ParkingThemeMode.LIGHT) {
+        parkingPalette().textPrimary
+    } else {
+        parkingPalette().background
+    }
+
+    private fun attachGlobalThemeToggle(parent: ViewGroup, params: ViewGroup.LayoutParams) {
+        (globalThemeToggle.parent as? ViewGroup)?.removeView(globalThemeToggle)
+        parent.addView(globalThemeToggle, params)
+    }
+
+    private fun styleGlobalThemeToggle(palette: ParkingPalette) {
+        globalThemeToggle.apply {
+            text = if (parkingThemeMode == ParkingThemeMode.LIGHT) "☾" else "☀"
+            contentDescription = if (parkingThemeMode == ParkingThemeMode.LIGHT) {
+                "切换到深色模式"
+            } else {
+                "切换到浅色模式"
+            }
+            gravity = Gravity.CENTER
+            setTextColor(color(palette.accentText))
+            background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 14)
+        }
+    }
+
+    private fun roundedBackground(
+        fill: String,
+        stroke: String,
+        radiusDp: Int,
+        endFill: String? = null
+    ): GradientDrawable = GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        intArrayOf(color(fill), color(endFill ?: fill))
+    ).apply {
+        cornerRadius = dp(radiusDp).toFloat()
+        setStroke(dp(1), color(stroke))
+    }
+
+    private fun tactileBackground(
+        normalFill: String,
+        pressedFill: String,
+        stroke: String,
+        radiusDp: Int
+    ): Drawable {
+        val states = StateListDrawable().apply {
+            addState(
+                intArrayOf(android.R.attr.state_pressed),
+                roundedBackground(pressedFill, stroke, radiusDp)
+            )
+            addState(intArrayOf(), roundedBackground(normalFill, stroke, radiusDp, pressedFill))
+        }
+        return RippleDrawable(
+            ColorStateList.valueOf(color(parkingPalette().accentSoft)),
+            states,
+            null
+        )
+    }
+
+    private fun bottomBorderBackground(border: String): Drawable =
+        object : ColorDrawable(Color.TRANSPARENT) {
+            private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = this@MainActivity.color(border)
+            }
+
+            override fun draw(canvas: Canvas) {
+                super.draw(canvas)
+                canvas.drawRect(
+                    bounds.left.toFloat(),
+                    (bounds.bottom - dp(1)).toFloat(),
+                    bounds.right.toFloat(),
+                    bounds.bottom.toFloat(),
+                    linePaint
+                )
+            }
+        }
+
     private fun matchWrapParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1341,5 +3203,13 @@ class MainActivity : Activity() {
         val subtitle: String,
         val status: String,
         val onClick: () -> Unit
+    )
+
+    private data class PatrolCheckpoint(
+        val code: String,
+        val title: String,
+        val subtitle: String,
+        val taskKey: String?,
+        val status: String
     )
 }

@@ -6,31 +6,50 @@
     android:orientation="vertical">
 
     <LinearLayout
+        android:id="@+id/topBar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
+        android:layout_height="48dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         android:paddingLeft="18dp"
-        android:paddingTop="18dp"
+        android:paddingTop="2dp"
         android:paddingRight="18dp"
-        android:paddingBottom="12dp">
+        android:paddingBottom="2dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/txtAppTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="iCar Key"
+                android:textColor="#141A1F"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/txtStatusPill"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="0dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:text="准备连接小车"
+                android:textColor="#59656F"
+                android:textSize="9sp" />
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/txtAppTitle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="智能小车助手"
-            android:textColor="#102A43"
-            android:textSize="22sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/txtStatusPill"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="准备连接小车"
-            android:textColor="#486581"
-            android:textSize="13sp" />
+            android:id="@+id/globalThemeToggle"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:gravity="center"
+            android:text="☾"
+            android:textSize="18sp" />
     </LinearLayout>
 
     <ScrollView
@@ -45,15 +64,15 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:paddingLeft="16dp"
-            android:paddingRight="16dp"
+            android:paddingLeft="14dp"
+            android:paddingRight="14dp"
             android:paddingBottom="108dp" />
     </ScrollView>
 
     <LinearLayout
         android:id="@+id/bottomNav"
         android:layout_width="match_parent"
-        android:layout_height="76dp"
+        android:layout_height="78dp"
         android:background="@drawable/bottom_bar_bg"
         android:gravity="center"
         android:orientation="horizontal"
@@ -68,9 +87,9 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center"
-            android:text="首页"
+            android:text="◆\n钥匙"
             android:textColor="#0F766E"
-            android:textSize="13sp"
+            android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
@@ -79,9 +98,9 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center"
-            android:text="驾驶"
+            android:text="◉\n驾驶"
             android:textColor="#627D98"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/navTasks"
@@ -89,9 +108,9 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center"
-            android:text="任务"
+            android:text="✦\nAI"
             android:textColor="#627D98"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/navVision"
@@ -99,9 +118,9 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center"
-            android:text="视觉"
+            android:text="◎\n视觉"
             android:textColor="#627D98"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <TextView
             android:id="@+id/navNav"
@@ -109,8 +128,8 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:gravity="center"
-            android:text="导航"
+            android:text="⌖\n导航"
             android:textColor="#627D98"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

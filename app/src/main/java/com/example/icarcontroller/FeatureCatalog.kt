@@ -3,11 +3,20 @@ package com.example.icarcontroller
 object FeatureCatalog {
     @JvmStatic
     fun primaryPages(): List<AppPage> = listOf(
-        AppPage("home", "首页", "小车状态与常用入口"),
-        AppPage("drive", "驾驶", "手动遥控小车"),
-        AppPage("tasks", "任务", "实训功能集合"),
-        AppPage("vision", "视觉", "识别与检测能力"),
-        AppPage("nav", "导航", "建图、规划与导航")
+        AppPage("home", "钥匙", "数字车钥匙与常用入口"),
+        AppPage("drive", "驾驶", "停车场人工接管"),
+        AppPage("ai", "AI", "停车场复合任务"),
+        AppPage("vision", "视觉", "车位、车辆与禁停检测"),
+        AppPage("nav", "导航", "B2 地图与巡逻路线")
+    )
+
+    @JvmStatic
+    fun keyActions(): List<FeatureItem> = listOf(
+        FeatureItem("drive", "驾驶", "进入遥控盘", "主控"),
+        FeatureItem("base", "底盘", "启动驱动", "必要"),
+        FeatureItem("avoidance", "避障", "雷达避障", "实训"),
+        FeatureItem("nav", "建图", "SLAM 流程", "流程"),
+        FeatureItem("ai", "AI", "任务规划", "预留")
     )
 
     @JvmStatic
@@ -20,38 +29,49 @@ object FeatureCatalog {
 
     @JvmStatic
     fun trainingTasks(): List<RobotTask> = listOf(
-        RobotTask("base", "底盘驱动", "让 APP 的移动指令真正发送到底盘", "基础"),
-        RobotTask("lidar", "激光雷达", "启动雷达数据采集，为避障和跟随提供距离信息", "基础"),
-        RobotTask("avoidance", "自动避障", "小车根据雷达距离自动绕开障碍", "实训"),
-        RobotTask("follow", "自动跟随", "小车跟随前方目标移动", "实训"),
-        RobotTask("warning", "自动警卫", "检测靠近物体并触发警卫响应", "实训"),
-        RobotTask("camera", "Astra 相机", "启动深度相机，为视觉功能做准备", "视觉"),
-        RobotTask("hsv", "HSV 调参", "调整颜色阈值，辅助颜色识别实验", "视觉"),
-        RobotTask("color_track", "颜色追踪", "追踪指定颜色目标", "视觉")
+        RobotTask("base", "人工接管底盘", "让 APP 的低速控制指令发送到底盘", "基础"),
+        RobotTask("lidar", "通道雷达", "采集通道距离，为避障和限制区检测提供数据", "基础"),
+        RobotTask("avoidance", "通道避障", "巡逻时根据雷达距离绕开车辆、路障和行人", "实训"),
+        RobotTask("follow", "动态目标跟随", "在教学区域跟随指定目标移动", "实训"),
+        RobotTask("warning", "限制区警卫", "检测有人靠近设备间或限制区域", "实训"),
+        RobotTask("camera", "停车场相机", "启动深度相机，为车位与车辆识别做准备", "视觉"),
+        RobotTask("hsv", "车辆颜色标定", "调整颜色阈值，辅助车辆颜色识别实验", "视觉"),
+        RobotTask("color_track", "目标车辆追踪", "追踪指定颜色的教学目标车辆", "视觉")
     )
 
     @JvmStatic
     fun visionFeatures(): List<FeatureItem> = listOf(
-        FeatureItem("camera", "摄像头预览", "后续接入视频流，显示小车实时画面", "待接入"),
-        FeatureItem("recognition", "视觉识别", "模型训练完成后展示识别类别和结果", "训练中"),
-        FeatureItem("detection", "目标检测", "显示检测框、类别和置信度", "训练中"),
-        FeatureItem("tracking", "视觉追踪", "结合检测结果控制小车追踪目标", "待接入")
+        FeatureItem("camera", "停车场预览", "接入相机流，显示小车前方通道与车位", "待接入"),
+        FeatureItem("recognition", "车位识别", "识别车位编号、占用状态和禁停标志", "训练中"),
+        FeatureItem("detection", "异常检测", "显示车辆、行人、烟雾和路障检测框", "训练中"),
+        FeatureItem("tracking", "目标复查", "结合检测结果控制小车靠近目标复查", "待接入")
     )
 
     @JvmStatic
     fun navigationFeatures(): List<FeatureItem> = listOf(
-        FeatureItem("mapping", "开始建图", "连接 SLAM 后记录环境地图", "待接入"),
-        FeatureItem("save_map", "保存地图", "建图完成后保存地图文件", "待接入"),
-        FeatureItem("planning", "路径规划", "选择目标点并生成路线", "待接入"),
-        FeatureItem("auto_nav", "自动导航", "让小车按规划路线自主行驶", "待接入")
+        FeatureItem("mapping", "SLAM 建图", "启动 Gmapping，缓慢移动小车扫描环境", "可接入"),
+        FeatureItem("save_map", "保存地图", "保存 yahboomcar.pgm 和 yahboomcar.yaml", "可接入"),
+        FeatureItem("planning", "路径规划", "Nav2 收到目标点后由 planner_server 自动生成路线", "可接入"),
+        FeatureItem("auto_nav", "自动导航", "DWA 或 TEB 控制器跟随规划路线行驶", "可接入")
+    )
+
+    @JvmStatic
+    fun navigationTasks(): List<RobotTask> = listOf(
+        RobotTask("map_gmapping", "启动建图", "ros2 launch yahboomcar_nav map_gmapping_launch.py", "建图"),
+        RobotTask("map_display", "显示建图地图", "ros2 launch yahboomcar_nav display_map_launch.py", "建图"),
+        RobotTask("map_save", "保存地图", "ros2 launch yahboomcar_nav save_map_launch.py", "建图"),
+        RobotTask("nav_laser", "雷达与底盘", "ros2 launch yahboomcar_nav laser_bringup_launch.py", "导航"),
+        RobotTask("nav_display", "显示导航地图", "ros2 launch yahboomcar_nav display_nav_launch.py", "导航"),
+        RobotTask("nav_dwa", "DWA 导航", "ros2 launch yahboomcar_nav navigation_dwa_launch.py", "导航"),
+        RobotTask("nav_teb", "TEB 导航", "ros2 launch yahboomcar_nav navigation_teb_launch.py", "导航")
     )
 
     @JvmStatic
     fun aiExamples(): List<String> = listOf(
-        "检查小车状态，并帮我进入自动避障模式",
-        "启动摄像头，识别到红色目标后提醒我",
-        "开始建图，完成后保存地图",
-        "让小车巡逻，遇到障碍物自动绕开"
+        "巡检 B2 东区车位，发现禁停车辆后提醒我",
+        "沿主通道巡逻，遇到车辆或行人自动绕开",
+        "检查设备间限制区域，有人靠近时触发警卫",
+        "完成停车场建图，保存地图并生成巡逻路线"
     )
 }
 

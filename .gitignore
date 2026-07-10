@@ -14,6 +14,13 @@ local.properties
 screen*.png
 window_home.xml
 
+# Python
+__pycache__/
+*.pyc
+
+# Local design-tool previews and runtime state
+.superpowers/
+
 # OS
 Thumbs.db
 .DS_Store

@@ -57,7 +57,16 @@ cd E:\ICarControllerApp
 
 ## 小车端前置服务
 
-APP 需要小车端先启动 Python 控制服务：
+APP 需要小车端先启动 Python 控制服务。仓库内提供了模板：
+
+```bash
+cd jetson_server
+python3 server.py --container 8b98 --host 0.0.0.0 --port 8000
+```
+
+如果建图和导航功能实际在自动导航专用容器中，请把 `8b98` 换成该容器 ID。
+
+旧版环境中如果服务位于 `~/icar_app_server`，也可以按原路径启动：
 
 ```bash
 cd ~/icar_app_server
@@ -65,3 +74,14 @@ python3 server.py --container 8b98 --host 0.0.0.0 --port 8000
 ```
 
 手机和小车需要处于同一个热点或局域网。
+
+## 建图、路径规划与自动导航
+
+APP 的“导航”页按第 3 章手册接入以下流程：
+
+1. SLAM 建图：启动 Gmapping，使用遥控页低速移动小车扫描环境。
+2. 保存地图：调用 `save_map_launch.py` 保存 `yahboomcar.pgm` 和 `yahboomcar.yaml`。
+3. 自动导航：先启动地图显示，再启动 DWA 或 TEB 导航节点。
+4. 路径规划：APP 发布初始位姿和目标点，Nav2 的 `planner_server` 生成路径，`controller_server` 控制小车跟随路径。
+
+手册里强调：RViz 地图显示节点要先于导航节点启动，否则可能订阅不到只发布一次的 `/map`。

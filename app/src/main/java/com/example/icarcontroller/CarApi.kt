@@ -22,6 +22,12 @@ class CarApi(host: String, private val port: Int) {
 
     fun emergencyStopUrl(): String = "$baseUrl/emergency_stop"
 
+    fun navigationInitialPoseUrl(x: Double, y: Double, yaw: Double): String =
+        navigationPoseUrl("initial_pose", x, y, yaw)
+
+    fun navigationGoalUrl(x: Double, y: Double, yaw: Double): String =
+        navigationPoseUrl("goal", x, y, yaw)
+
     fun moveUrl(direction: String, speed: Double, turn: Double? = null): String {
         val speedText = speed.toFixedText()
         val turnPart = turn?.let { "&turn=${it.toFixedText()}" } ?: ""
@@ -33,6 +39,9 @@ class CarApi(host: String, private val port: Int) {
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name())
+
+    private fun navigationPoseUrl(kind: String, x: Double, y: Double, yaw: Double): String =
+        "$baseUrl/navigation/$kind?x=${x.toFixedText()}&y=${y.toFixedText()}&yaw=${yaw.toFixedText()}"
 
     private fun Double.toFixedText(): String =
         String.format(Locale.US, "%.2f", this).trimEnd('0').trimEnd('.')

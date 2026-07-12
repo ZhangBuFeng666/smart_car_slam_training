@@ -4,7 +4,9 @@ import org.junit.Test;
 
 import java.lang.reflect.Method;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
@@ -69,6 +71,26 @@ public class InteractionSpecTest {
         assertTrue((Integer) requiredSpec("parkingDriveButtonElevationDp") >= 4);
         assertTrue((Integer) requiredSpec("parkingThemeToggleSizeDp") >= 44);
         assertEquals("global_chrome", requiredSpec("parkingThemeControlPlacement"));
+    }
+
+    @Test
+    public void cameraStreamUsesBoundedProductSettings() {
+        assertEquals(2_000_000, requiredSpec("cameraMaxFrameBytes"));
+        assertEquals(640, requiredSpec("cameraTargetWidth"));
+        assertEquals(480, requiredSpec("cameraTargetHeight"));
+        assertEquals(300, requiredSpec("cameraLatencyTargetMillis"));
+        assertArrayEquals(
+                new int[] {1000, 2000, 4000, 5000},
+                (int[]) requiredSpec("cameraReconnectDelaysMillis")
+        );
+    }
+
+    @Test
+    public void cameraFullscreenKeepsControlsAtTheLandscapeEdges() {
+        assertEquals("landscape", requiredSpec("cameraFullscreenOrientation"));
+        assertEquals("edge_floating", requiredSpec("cameraFullscreenControlLayout"));
+        assertFalse((Boolean) requiredSpec("cameraFullscreenUsesControlPanels"));
+        assertTrue((Float) requiredSpec("cameraGlassButtonAlpha") <= 0.18f);
     }
 
     private Object requiredSpec(String methodName) {

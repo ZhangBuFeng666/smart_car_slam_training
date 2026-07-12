@@ -84,4 +84,31 @@ object InteractionSpec {
 
     @JvmStatic
     fun parkingThemeControlPlacement(): String = "global_chrome"
+
+    @JvmStatic
+    fun cameraMaxFrameBytes(): Int = 2_000_000
+
+    @JvmStatic
+    fun cameraTargetWidth(): Int = 640
+
+    @JvmStatic
+    fun cameraTargetHeight(): Int = 480
+
+    @JvmStatic
+    fun cameraLatencyTargetMillis(): Int = 300
+
+    @JvmStatic
+    fun cameraReconnectDelaysMillis(): IntArray = intArrayOf(1000, 2000, 4000, 5000)
+
+    @JvmStatic
+    fun cameraFullscreenOrientation(): String = "landscape"
+
+    @JvmStatic
+    fun cameraFullscreenControlLayout(): String = "edge_floating"
+
+    @JvmStatic
+    fun cameraFullscreenUsesControlPanels(): Boolean = false
+
+    @JvmStatic
+    fun cameraGlassButtonAlpha(): Float = 0.18f
 }

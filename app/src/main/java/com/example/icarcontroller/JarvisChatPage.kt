@@ -136,6 +136,13 @@ class JarvisChatPage(
         }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, dp(10), 0, 0)
         })
+        addView(outlineButton(JarvisUiSpec.dangerAction()) {
+            onEmergencyStop()
+            state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded("已发送急停指令。"))
+            render()
+        }, LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply {
+            setMargins(0, dp(10), 0, 0)
+        })
     }
 
     private fun promptChip(prompt: String): TextView = TextView(context).apply {

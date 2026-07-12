@@ -423,7 +423,15 @@ class MainActivity : Activity() {
             subtitle = JarvisUiSpec.headerSubtitle(),
             status = "连接 8100"
         ))
-        pageContent.addView(parkingAiWorkspace())
+        pageContent.addView(JarvisChatPage(
+            context = this,
+            host = currentHost,
+            executor = commandExecutor,
+            onStatus = { status -> setStatus(status) },
+            onEmergencyStop = {
+                sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)
+            }
+        ))
         pageContent.addView(parkingSafetyStrip())
     }
 

@@ -65,6 +65,7 @@ class MainActivity : Activity() {
     private var txtLog: TextView? = null
     private var vehicleStage: Vehicle3DStageView? = null
     private var parkingVisionView: ParkingVisionView? = null
+    private var driveCameraPanel: DriveCameraPanel? = null
     private var homeConnectionText: TextView? = null
     private var pageStatusText: TextView? = null
 
@@ -110,6 +111,7 @@ class MainActivity : Activity() {
         globalThemeToggle = findViewById(R.id.globalThemeToggle)
         globalThemeToggle.setOnClickListener {
             forceStopForExit(DriveExitEvent.THEME_CHANGE)
+            releaseDriveCameraPanel()
             parkingThemeMode = ParkingThemeSpec.nextMode(parkingThemeMode)
             parkingThemeStore.save(parkingThemeMode)
             renderPage(selectedPage)
@@ -138,6 +140,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        releaseDriveCameraPanel()
         vehicleStage?.destroy()
         vehicleStage = null
         stopMove()
@@ -151,10 +154,14 @@ class MainActivity : Activity() {
         super.onResume()
         vehicleStage?.onHostResume()
         parkingVisionView?.setActive(true)
+        if (selectedPage == "drive") {
+            driveCameraPanel?.start(api().cameraStreamUrl())
+        }
     }
 
     override fun onPause() {
         forceStopForExit(DriveExitEvent.APP_PAUSE)
+        driveCameraPanel?.stop()
         vehicleStage?.onHostPause()
         parkingVisionView?.setActive(false)
         super.onPause()
@@ -162,6 +169,7 @@ class MainActivity : Activity() {
 
     private fun renderPage(key: String) {
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
+        releaseDriveCameraPanel()
         saveConnectionInputs()
         selectedPage = key
         currentDirection = null
@@ -194,6 +202,11 @@ class MainActivity : Activity() {
         scrollContent.post { scrollContent.smoothScrollTo(0, 0) }
     }
 
+    private fun releaseDriveCameraPanel() {
+        driveCameraPanel?.release()
+        driveCameraPanel = null
+    }
+
     private fun renderHome() {
         pageContent.addView(digitalKeyStage())
     }
@@ -205,6 +218,11 @@ class MainActivity : Activity() {
             subtitle = "停车场低速操控，按住移动，松手立即刹停。",
             status = "待连接"
         ))
+        driveCameraPanel = DriveCameraPanel(this, parkingPalette()).also { panel ->
+            panel.layoutParams = matchWrapParams(bottom = 12)
+            pageContent.addView(panel)
+            panel.start(api().cameraStreamUrl())
+        }
         pageContent.addView(parkingDriveStatus())
         pageContent.addView(parkingRemoteConsole())
         updateSpeedText()

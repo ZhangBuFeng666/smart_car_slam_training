@@ -6,6 +6,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
@@ -15,8 +17,8 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -45,12 +47,9 @@ class MjpegStreamView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
     private val stateLock = Any()
-    private val bitmapLock = Any()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val destination = RectF()
-    private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { task ->
-        Thread(task, "MjpegStreamView").apply { isDaemon = true }
-    }
     private val reconnectDelaysMillis = InteractionSpec.cameraReconnectDelaysMillis()
 
     private var displayedBitmap: Bitmap? = null
@@ -58,11 +57,14 @@ class MjpegStreamView @JvmOverloads constructor(
     private var generation = 0L
     private var streamUrl: String? = null
     private var snapshotListener: ((CameraViewSnapshot) -> Unit)? = null
+    private var executor: ScheduledExecutorService? = null
     private var connection: HttpURLConnection? = null
     private var scheduledAttempt: ScheduledFuture<*>? = null
+    private var runningAttempt: Future<*>? = null
+    private var runningAttemptGeneration: Long? = null
 
     fun start(url: String, listener: (CameraViewSnapshot) -> Unit) {
-        val previousConnection: HttpURLConnection?
+        val resources: WorkerResources
         val currentGeneration: Long
         synchronized(stateLock) {
             generation += 1
@@ -70,19 +72,17 @@ class MjpegStreamView @JvmOverloads constructor(
             active = true
             streamUrl = url
             snapshotListener = listener
-            scheduledAttempt?.cancel(true)
-            scheduledAttempt = null
-            previousConnection = connection
-            connection = null
+            resources = detachWorkerLocked(shutdownExecutor = true)
+            executor = newExecutor()
         }
-        previousConnection?.disconnect()
-        clearBitmap()
+        resources.cancel()
+        clearBitmapOnMain()
         publishSnapshot(currentGeneration, CameraViewSnapshot(CameraViewState.CONNECTING))
         scheduleAttempt(currentGeneration, retryIndex = 0, delayMillis = 0)
     }
 
     fun stop() {
-        val previousConnection: HttpURLConnection?
+        val resources: WorkerResources
         val previousListener: ((CameraViewSnapshot) -> Unit)?
         val stoppedGeneration: Long
         synchronized(stateLock) {
@@ -92,14 +92,11 @@ class MjpegStreamView @JvmOverloads constructor(
             streamUrl = null
             previousListener = snapshotListener
             snapshotListener = null
-            scheduledAttempt?.cancel(true)
-            scheduledAttempt = null
-            previousConnection = connection
-            connection = null
+            resources = detachWorkerLocked(shutdownExecutor = false)
         }
-        previousConnection?.disconnect()
-        clearBitmap()
-        post {
+        resources.cancel()
+        clearBitmapOnMain()
+        runOnMain {
             if (isStoppedGeneration(stoppedGeneration)) {
                 previousListener?.invoke(CameraViewSnapshot(CameraViewState.IDLE))
             }
@@ -107,7 +104,7 @@ class MjpegStreamView @JvmOverloads constructor(
     }
 
     fun reconnect() {
-        val previousConnection: HttpURLConnection?
+        val resources: WorkerResources
         val currentGeneration: Long
         synchronized(stateLock) {
             if (!active || streamUrl == null || snapshotListener == null) {
@@ -115,33 +112,47 @@ class MjpegStreamView @JvmOverloads constructor(
             }
             generation += 1
             currentGeneration = generation
-            scheduledAttempt?.cancel(true)
-            scheduledAttempt = null
-            previousConnection = connection
-            connection = null
+            resources = detachWorkerLocked(shutdownExecutor = true)
+            executor = newExecutor()
         }
-        previousConnection?.disconnect()
-        clearBitmap()
+        resources.cancel()
+        clearBitmapOnMain()
         publishSnapshot(currentGeneration, CameraViewSnapshot(CameraViewState.CONNECTING))
         scheduleAttempt(currentGeneration, retryIndex = 0, delayMillis = 0)
     }
 
+    fun release() {
+        val resources: WorkerResources
+        synchronized(stateLock) {
+            generation += 1
+            active = false
+            streamUrl = null
+            snapshotListener = null
+            resources = detachWorkerLocked(shutdownExecutor = true)
+        }
+        resources.cancel()
+        clearBitmapOnMain()
+    }
+
+    override fun onDetachedFromWindow() {
+        release()
+        super.onDetachedFromWindow()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        synchronized(bitmapLock) {
-            val bitmap = displayedBitmap ?: return
-            if (width <= 0 || height <= 0 || bitmap.width <= 0 || bitmap.height <= 0) {
-                return
-            }
-
-            val scale = max(width.toFloat() / bitmap.width, height.toFloat() / bitmap.height)
-            val scaledWidth = bitmap.width * scale
-            val scaledHeight = bitmap.height * scale
-            val left = (width - scaledWidth) / 2f
-            val top = (height - scaledHeight) / 2f
-            destination.set(left, top, left + scaledWidth, top + scaledHeight)
-            canvas.drawBitmap(bitmap, null, destination, bitmapPaint)
+        val bitmap = displayedBitmap ?: return
+        if (width <= 0 || height <= 0 || bitmap.width <= 0 || bitmap.height <= 0) {
+            return
         }
+
+        val scale = max(width.toFloat() / bitmap.width, height.toFloat() / bitmap.height)
+        val scaledWidth = bitmap.width * scale
+        val scaledHeight = bitmap.height * scale
+        val left = (width - scaledWidth) / 2f
+        val top = (height - scaledHeight) / 2f
+        destination.set(left, top, left + scaledWidth, top + scaledHeight)
+        canvas.drawBitmap(bitmap, null, destination, bitmapPaint)
     }
 
     private fun scheduleAttempt(currentGeneration: Long, retryIndex: Int, delayMillis: Int) {
@@ -149,7 +160,8 @@ class MjpegStreamView @JvmOverloads constructor(
             if (!isCurrentLocked(currentGeneration)) {
                 return
             }
-            scheduledAttempt = executor.schedule(
+            val currentExecutor = executor ?: return
+            scheduledAttempt = currentExecutor.schedule(
                 { runAttempt(currentGeneration, retryIndex) },
                 delayMillis.toLong(),
                 TimeUnit.MILLISECONDS
@@ -162,12 +174,15 @@ class MjpegStreamView @JvmOverloads constructor(
             if (!isCurrentLocked(currentGeneration)) {
                 return
             }
+            runningAttempt = scheduledAttempt
+            runningAttemptGeneration = currentGeneration
             scheduledAttempt = null
             streamUrl
         } ?: return
 
         publishSnapshot(currentGeneration, CameraViewSnapshot(CameraViewState.CONNECTING))
         var openedConnection: HttpURLConnection? = null
+        var decodedLiveFrame = false
         try {
             openedConnection = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = CONNECT_TIMEOUT_MILLIS
@@ -188,8 +203,12 @@ class MjpegStreamView @JvmOverloads constructor(
 
             val responseCode = openedConnection.responseCode
             if (responseCode == HttpURLConnection.HTTP_UNAVAILABLE) {
-                val responseText = readResponseText(openedConnection.errorStream ?: openedConnection.inputStream)
-                val state = unavailableState(responseText)
+                val responseText = readResponseText(openedConnection.errorStream)
+                val state = when (InteractionSpec.cameraHttp503State(responseText)) {
+                    "busy" -> CameraViewState.BUSY
+                    "missing" -> CameraViewState.MISSING
+                    else -> CameraViewState.DISCONNECTED
+                }
                 publishSnapshot(currentGeneration, CameraViewSnapshot(state, error = responseText.ifBlank { null }))
                 scheduleRetry(currentGeneration, retryIndex)
                 return
@@ -198,7 +217,9 @@ class MjpegStreamView @JvmOverloads constructor(
                 throw EOFException("Camera stream returned HTTP $responseCode")
             }
 
-            readFrames(currentGeneration, openedConnection.inputStream)
+            readFrames(currentGeneration, openedConnection.inputStream) {
+                decodedLiveFrame = true
+            }
             if (isCurrent(currentGeneration)) {
                 throw EOFException("Camera stream ended")
             }
@@ -211,19 +232,27 @@ class MjpegStreamView @JvmOverloads constructor(
                         error = error.message ?: error.javaClass.simpleName
                     )
                 )
-                scheduleRetry(currentGeneration, retryIndex)
+                scheduleRetry(currentGeneration, if (decodedLiveFrame) 0 else retryIndex)
             }
         } finally {
             synchronized(stateLock) {
                 if (connection === openedConnection) {
                     connection = null
                 }
+                if (runningAttemptGeneration == currentGeneration) {
+                    runningAttempt = null
+                    runningAttemptGeneration = null
+                }
             }
             openedConnection?.disconnect()
         }
     }
 
-    private fun readFrames(currentGeneration: Long, input: InputStream) {
+    private fun readFrames(
+        currentGeneration: Long,
+        input: InputStream,
+        onLiveFrame: () -> Unit
+    ) {
         val reader = MjpegFrameReader(input, InteractionSpec.cameraMaxFrameBytes())
         var windowStartedAt = SystemClock.elapsedRealtime()
         var framesInWindow = 0
@@ -231,11 +260,15 @@ class MjpegStreamView @JvmOverloads constructor(
 
         while (isCurrent(currentGeneration)) {
             val frame = reader.nextFrame() ?: return
-            val bitmap = BitmapFactory.decodeByteArray(frame, 0, frame.size) ?: continue
-            if (!replaceBitmap(currentGeneration, bitmap)) {
+            if (!isCurrent(currentGeneration)) {
+                return
+            }
+            val bitmap = decodeFrame(frame) ?: continue
+            if (!publishBitmap(currentGeneration, bitmap)) {
                 return
             }
 
+            onLiveFrame()
             framesInWindow += 1
             if (!liveReported) {
                 liveReported = true
@@ -253,34 +286,44 @@ class MjpegStreamView @JvmOverloads constructor(
         }
     }
 
-    private fun replaceBitmap(currentGeneration: Long, bitmap: Bitmap): Boolean {
+    private fun decodeFrame(frame: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(frame, 0, frame.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null
+        }
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = InteractionSpec.cameraDecodeSampleSize(bounds.outWidth, bounds.outHeight)
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        return BitmapFactory.decodeByteArray(frame, 0, frame.size, options)
+    }
+
+    private fun publishBitmap(currentGeneration: Long, bitmap: Bitmap): Boolean {
         if (!isCurrent(currentGeneration)) {
             bitmap.recycle()
             return false
         }
-        synchronized(bitmapLock) {
+        mainHandler.post {
             if (!isCurrent(currentGeneration)) {
                 bitmap.recycle()
-                return false
+                return@post
             }
             val previous = displayedBitmap
             displayedBitmap = bitmap
             previous?.recycle()
-        }
-        post {
-            if (isCurrent(currentGeneration)) {
-                postInvalidateOnAnimation()
-            }
+            postInvalidateOnAnimation()
         }
         return true
     }
 
-    private fun clearBitmap() {
-        synchronized(bitmapLock) {
-            displayedBitmap?.recycle()
+    private fun clearBitmapOnMain() {
+        runOnMain {
+            val previous = displayedBitmap
             displayedBitmap = null
+            previous?.recycle()
+            invalidate()
         }
-        postInvalidate()
     }
 
     private fun scheduleRetry(currentGeneration: Long, retryIndex: Int) {
@@ -296,11 +339,41 @@ class MjpegStreamView @JvmOverloads constructor(
     }
 
     private fun publishSnapshot(currentGeneration: Long, snapshot: CameraViewSnapshot) {
-        post {
+        mainHandler.post {
             val listener = synchronized(stateLock) {
                 if (!isCurrentLocked(currentGeneration)) null else snapshotListener
             }
             listener?.invoke(snapshot)
+        }
+    }
+
+    private fun detachWorkerLocked(shutdownExecutor: Boolean): WorkerResources {
+        val resources = WorkerResources(
+            connection = connection,
+            scheduledAttempt = scheduledAttempt,
+            runningAttempt = runningAttempt,
+            executor = if (shutdownExecutor) executor else null
+        )
+        connection = null
+        scheduledAttempt = null
+        runningAttempt = null
+        runningAttemptGeneration = null
+        if (shutdownExecutor) {
+            executor = null
+        }
+        return resources
+    }
+
+    private fun newExecutor(): ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "MjpegStreamView").apply { isDaemon = true }
+        }
+
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
         }
     }
 
@@ -313,15 +386,6 @@ class MjpegStreamView @JvmOverloads constructor(
 
     private fun isStoppedGeneration(stoppedGeneration: Long): Boolean = synchronized(stateLock) {
         !active && generation == stoppedGeneration
-    }
-
-    private fun unavailableState(responseText: String): CameraViewState {
-        val normalized = responseText.lowercase(Locale.US)
-        return when {
-            "busy" in normalized -> CameraViewState.BUSY
-            "missing" in normalized -> CameraViewState.MISSING
-            else -> CameraViewState.DISCONNECTED
-        }
     }
 
     private fun readResponseText(input: InputStream?): String {
@@ -339,6 +403,20 @@ class MjpegStreamView @JvmOverloads constructor(
                 result.append(buffer, 0, count)
             }
             return result.toString().trim()
+        }
+    }
+
+    private data class WorkerResources(
+        val connection: HttpURLConnection?,
+        val scheduledAttempt: Future<*>?,
+        val runningAttempt: Future<*>?,
+        val executor: ScheduledExecutorService?
+    ) {
+        fun cancel() {
+            scheduledAttempt?.cancel(true)
+            runningAttempt?.cancel(true)
+            connection?.disconnect()
+            executor?.shutdownNow()
         }
     }
 

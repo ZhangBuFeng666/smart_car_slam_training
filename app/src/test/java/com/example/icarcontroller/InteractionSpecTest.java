@@ -93,6 +93,32 @@ public class InteractionSpecTest {
         assertTrue((Float) requiredSpec("cameraGlassButtonAlpha") <= 0.18f);
     }
 
+    @Test
+    public void cameraDecoderKeepsFramesAtOrBelowTargetSize() {
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(640, 480));
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(320, 240));
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(0, 0));
+    }
+
+    @Test
+    public void cameraDecoderUsesPowerOfTwoSamplingForLargeFrames() {
+        assertEquals(2, InteractionSpec.cameraDecodeSampleSize(1920, 1080));
+        assertEquals(4, InteractionSpec.cameraDecodeSampleSize(4000, 3000));
+    }
+
+    @Test
+    public void cameraUnavailableStateReadsExplicitJsonState() {
+        assertEquals("busy", InteractionSpec.cameraHttp503State("{\"state\": \"busy\"}"));
+        assertEquals("missing", InteractionSpec.cameraHttp503State("{\n\"state\" : \"MISSING\"\n}"));
+    }
+
+    @Test
+    public void cameraUnavailableStateRejectsAmbiguousOrNestedText() {
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"message\":\"camera busy\"}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"error\":{\"state\":\"missing\"}}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("not json: state=busy"));
+    }
+
     private Object requiredSpec(String methodName) {
         try {
             Method method = InteractionSpec.class.getMethod(methodName);

@@ -4,7 +4,10 @@ import org.junit.Test;
 
 import java.lang.reflect.Method;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
@@ -56,7 +59,13 @@ public class InteractionSpecTest {
 
     @Test
     public void parkingPatrolPagesPrioritizeOperationalSurfaces() {
-        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") >= 76);
+        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") >= 60);
+        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") <= 66);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraWidthUnits") >= 10);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraWidthUnits") <= 12);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraHeightUnits") <= 9);
+        assertEquals("speed_only", requiredSpec("drivePortraitInfoPanelMode"));
+        assertEquals("grid_corners", requiredSpec("driveAuxiliaryButtonPlacement"));
         assertTrue((Integer) requiredSpec("parkingTaskRailHeightDp") >= 108);
         assertTrue((Integer) requiredSpec("parkingVisionStageHeightDp") >= 280);
         assertTrue((Integer) requiredSpec("parkingMapStageHeightDp") >= 300);
@@ -69,6 +78,104 @@ public class InteractionSpecTest {
         assertTrue((Integer) requiredSpec("parkingDriveButtonElevationDp") >= 4);
         assertTrue((Integer) requiredSpec("parkingThemeToggleSizeDp") >= 44);
         assertEquals("global_chrome", requiredSpec("parkingThemeControlPlacement"));
+    }
+
+    @Test
+    public void cameraStreamUsesBoundedProductSettings() {
+        assertEquals(2_000_000, requiredSpec("cameraMaxFrameBytes"));
+        assertEquals(640, requiredSpec("cameraTargetWidth"));
+        assertEquals(480, requiredSpec("cameraTargetHeight"));
+        assertEquals(300, requiredSpec("cameraLatencyTargetMillis"));
+        assertArrayEquals(
+                new int[] {1000, 2000, 4000, 5000},
+                (int[]) requiredSpec("cameraReconnectDelaysMillis")
+        );
+    }
+
+    @Test
+    public void cameraFullscreenKeepsControlsAtTheLandscapeEdges() {
+        assertEquals("landscape", requiredSpec("cameraFullscreenOrientation"));
+        assertEquals("edge_floating", requiredSpec("cameraFullscreenControlLayout"));
+        assertFalse((Boolean) requiredSpec("cameraFullscreenUsesControlPanels"));
+        assertTrue((Float) requiredSpec("cameraGlassButtonAlpha") <= 0.18f);
+    }
+
+    @Test
+    public void cameraDecoderKeepsFramesAtOrBelowTargetSize() {
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(640, 480));
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(320, 240));
+        assertEquals(1, InteractionSpec.cameraDecodeSampleSize(0, 0));
+    }
+
+    @Test
+    public void cameraDecoderUsesPowerOfTwoSamplingForLargeFrames() {
+        assertEquals(2, InteractionSpec.cameraDecodeSampleSize(1920, 1080));
+        assertEquals(4, InteractionSpec.cameraDecodeSampleSize(4000, 3000));
+    }
+
+    @Test
+    public void cameraUnavailableStateReadsExplicitJsonState() {
+        assertEquals("busy", InteractionSpec.cameraHttp503State("{\"state\": \"busy\"}"));
+        assertEquals("missing", InteractionSpec.cameraHttp503State("{\n\"state\" : \"MISSING\"\n}"));
+    }
+
+    @Test
+    public void cameraUnavailableStateRejectsAmbiguousOrNestedText() {
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"message\":\"camera busy\"}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"error\":{\"state\":\"missing\"}}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("not json: state=busy"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"state\":\"busy\",\"invalid\":}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"state\":\"busy\"} trailing"));
+    }
+
+    @Test
+    public void cameraReparentGuardOnlySkipsTheArmedDetach() {
+        CameraReparentGuard guard = new CameraReparentGuard();
+
+        assertTrue(guard.shouldReleaseOnDetach());
+        guard.beginReparent();
+        assertFalse(guard.shouldReleaseOnDetach());
+        assertTrue(guard.shouldReleaseOnDetach());
+    }
+
+    @Test
+    public void cameraReparentGuardClearsOnAttachOrExplicitEnd() {
+        CameraReparentGuard guard = new CameraReparentGuard();
+
+        guard.beginReparent();
+        guard.onAttached();
+        assertTrue(guard.shouldReleaseOnDetach());
+
+        guard.beginReparent();
+        guard.endReparent();
+        assertTrue(guard.shouldReleaseOnDetach());
+    }
+
+    @Test
+    public void latestValueCoalescerKeepsOnlyTheNewestPendingValue() {
+        LatestValueCoalescer<String> coalescer = new LatestValueCoalescer<>();
+
+        LatestValueOffer<String> first = coalescer.offer("first");
+        assertTrue(first.getShouldScheduleDrain());
+        assertNull(first.getReplaced());
+
+        LatestValueOffer<String> second = coalescer.offer("second");
+        assertFalse(second.getShouldScheduleDrain());
+        assertEquals("first", second.getReplaced());
+        assertEquals("second", coalescer.drain());
+
+        assertTrue(coalescer.offer("third").getShouldScheduleDrain());
+    }
+
+    @Test
+    public void latestValueCoalescerClearKeepsQueuedDrainHarmlessAndReusable() {
+        LatestValueCoalescer<String> coalescer = new LatestValueCoalescer<>();
+
+        assertTrue(coalescer.offer("first").getShouldScheduleDrain());
+        assertEquals("first", coalescer.clear());
+        assertFalse(coalescer.offer("second").getShouldScheduleDrain());
+        assertEquals("second", coalescer.drain());
+        assertNull(coalescer.drain());
     }
 
     private Object requiredSpec(String methodName) {

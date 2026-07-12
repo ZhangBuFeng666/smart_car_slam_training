@@ -14,6 +14,12 @@ class CarApi(host: String, private val port: Int) {
 
     fun statusUrl(): String = "$baseUrl/status"
 
+    fun cameraStreamUrl(): String = "$baseUrl/camera/stream"
+
+    fun cameraStatusUrl(): String = "$baseUrl/camera/status"
+
+    fun cameraRestartUrl(): String = "$baseUrl/camera/restart"
+
     fun startTaskUrl(task: String): String = "$baseUrl/start/${encode(task)}"
 
     fun stopTaskUrl(task: String): String = "$baseUrl/stop/${encode(task)}"

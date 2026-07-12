@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import json
 import math
 import os
 import queue
 import shlex
 import signal
+import socket
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    from .camera_stream import CameraCaptureService
+except ImportError:
+    from camera_stream import CameraCaptureService
 
 
 ROS_DOMAIN_ID = 32
@@ -67,6 +74,14 @@ SERVER_CONFIG = {
     "dry_run": False,
 }
 MOTION_BRIDGE = None
+CAMERA_STREAM = None
+STREAM_WRITE_TIMEOUT = 2.0
+STREAM_DISCONNECT_ERRNOS = {
+    errno.ECONNABORTED,
+    errno.ECONNRESET,
+    errno.EPIPE,
+    errno.ETIMEDOUT,
+}
 
 
 class MotionBridgeClient:
@@ -216,6 +231,65 @@ def create_motion_bridge(container):
     return MotionBridgeClient(
         container=container,
         script_path=Path(__file__).with_name("motion_bridge.py"),
+    )
+
+
+def create_camera_stream(device, width, height, fps, quality):
+    return CameraCaptureService(
+        configured_device=device,
+        width=width,
+        height=height,
+        fps=fps,
+        jpeg_quality=quality,
+    )
+
+
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def jpeg_quality(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 100")
+    if not 1 <= parsed <= 100:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 100")
+    return parsed
+
+
+def port_number(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 65535")
+    if not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 65535")
+    return parsed
+
+
+def is_stream_disconnect(error):
+    if isinstance(
+        error,
+        (socket.timeout, TimeoutError, BrokenPipeError, ConnectionResetError, ConnectionAbortedError),
+    ):
+        return True
+    return isinstance(error, OSError) and error.errno in STREAM_DISCONNECT_ERRNOS
+
+
+def build_mjpeg_chunk(jpeg):
+    return (
+        b"--frame\r\n"
+        b"Content-Type: image/jpeg\r\n"
+        + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+        + jpeg
+        + b"\r\n"
     )
 
 
@@ -443,6 +517,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.strip("/")
         query = parse_qs(parsed.query)
 
+        if path == "camera/stream":
+            self.stream_camera()
+            return
+
         try:
             status, body = self.route(path, query)
         except ValueError as error:
@@ -451,7 +529,80 @@ class Handler(BaseHTTPRequestHandler):
             status, body = 500, {"error": str(error)}
         self.reply(status, body)
 
+    def stream_camera(self):
+        camera_stream = CAMERA_STREAM
+        if camera_stream is None:
+            self.reply(503, {"state": "unavailable", "error": "camera service unavailable"})
+            return
+
+        camera_stream.acquire_client()
+        connection = getattr(self, "connection", None)
+        previous_timeout = None
+        timeout_changed = False
+        try:
+            if not camera_stream.wait_until_ready(timeout=2.0):
+                snapshot = camera_stream.status()
+                state = snapshot.get("state", "unavailable")
+                error = snapshot.get("error") or f"camera {state}"
+                self.reply(503, {"state": state, "error": error})
+                return
+
+            if connection is not None:
+                previous_timeout = connection.gettimeout()
+                connection.settimeout(STREAM_WRITE_TIMEOUT)
+                timeout_changed = True
+
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except OSError as error:
+                if is_stream_disconnect(error):
+                    return
+                raise
+
+            sequence = 0
+            while True:
+                next_sequence, jpeg = camera_stream.wait_for_frame(sequence, timeout=1.0)
+                if jpeg is None:
+                    if camera_stream.status().get("state") in {
+                        "busy",
+                        "disconnected",
+                        "idle",
+                        "missing",
+                    }:
+                        break
+                    continue
+                if next_sequence <= sequence:
+                    continue
+                sequence = next_sequence
+                try:
+                    self.wfile.write(build_mjpeg_chunk(jpeg))
+                    self.wfile.flush()
+                except OSError as error:
+                    if is_stream_disconnect(error):
+                        break
+                    raise
+        finally:
+            if timeout_changed:
+                try:
+                    connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
+            camera_stream.release_client()
+
     def route(self, path, query):
+        if path == "camera/status":
+            if CAMERA_STREAM is None:
+                return 503, {"state": "unavailable", "error": "camera service unavailable"}
+            return 200, CAMERA_STREAM.status()
+        if path == "camera/restart":
+            if CAMERA_STREAM is None:
+                return 503, {"state": "unavailable", "error": "camera service unavailable"}
+            return 200, CAMERA_STREAM.restart()
         if path == "health":
             return 200, {
                 "ok": True,
@@ -508,16 +659,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global MOTION_BRIDGE
+    global CAMERA_STREAM, MOTION_BRIDGE
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default="8b98")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=port_number, default=8000)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--camera-device", default=None)
+    parser.add_argument("--camera-width", type=positive_int, default=640)
+    parser.add_argument("--camera-height", type=positive_int, default=480)
+    parser.add_argument("--camera-fps", type=positive_int, default=18)
+    parser.add_argument("--camera-quality", type=jpeg_quality, default=70)
     args = parser.parse_args()
     SERVER_CONFIG["container"] = args.container
     SERVER_CONFIG["dry_run"] = args.dry_run
     MOTION_BRIDGE = create_motion_bridge(args.container)
+    CAMERA_STREAM = create_camera_stream(
+        device=args.camera_device,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+        quality=args.camera_quality,
+    )
 
     if not args.dry_run:
         try:
@@ -530,14 +693,22 @@ def main():
         except Exception as error:
             print(f"Motion bridge warm-up failed: {error}")
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Smart car HTTP server on {args.host}:{args.port}, container={args.container}")
+    server = None
     try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+        print(f"Smart car HTTP server on {args.host}:{args.port}, container={args.container}")
         server.serve_forever()
     finally:
-        server.server_close()
-        if MOTION_BRIDGE is not None:
-            MOTION_BRIDGE.shutdown()
+        try:
+            if CAMERA_STREAM is not None:
+                CAMERA_STREAM.shutdown()
+        finally:
+            try:
+                if server is not None:
+                    server.server_close()
+            finally:
+                if MOTION_BRIDGE is not None:
+                    MOTION_BRIDGE.shutdown()
 
 
 if __name__ == "__main__":

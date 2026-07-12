@@ -20,8 +20,10 @@ from jarvis_agent.mission_engine import MissionEngine, MissionNotFoundError
 from jarvis_agent.models import (
     ChatRequest,
     ChatResponse,
+    DecisionType,
     DecisionRequest,
     MissionCreateRequest,
+    MissionState,
     VisionEvent,
 )
 from jarvis_agent.reporting import ReportService
@@ -148,7 +150,11 @@ def create_app(
         dependencies=[Depends(require_auth)],
     )
     def submit_decision(mission_id: str, request: DecisionRequest):
-        return repository.save_decision(mission_id, request)
+        decision = repository.save_decision(mission_id, request)
+        if request.decision is DecisionType.FINISH:
+            reports.build_fallback_report(mission_id)
+            repository.set_mission_state(mission_id, MissionState.COMPLETED)
+        return decision
 
     @app.get(
         "/api/v1/missions/{mission_id}/report",

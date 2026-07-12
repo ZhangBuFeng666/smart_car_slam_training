@@ -139,3 +139,5 @@ Run the simulated parking-lot event flow after creating a mission:
   --mission-id "$MISSION_ID" \
   --scenario parking-lot
 ```
+
+For a complete phase-one demo sequence, see `docs/jarvis-demo-runbook.md`.

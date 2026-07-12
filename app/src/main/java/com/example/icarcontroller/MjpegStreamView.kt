@@ -337,9 +337,7 @@ class MjpegStreamView @JvmOverloads constructor(
     private fun clearBitmapOnMain() {
         pendingBitmaps.clear()?.bitmap?.recycle()
         runOnMain {
-            val previous = displayedBitmap
             displayedBitmap = null
-            previous?.recycle()
             invalidate()
         }
     }
@@ -350,9 +348,7 @@ class MjpegStreamView @JvmOverloads constructor(
             pending.bitmap.recycle()
             return
         }
-        val previous = displayedBitmap
         displayedBitmap = pending.bitmap
-        previous?.recycle()
         postInvalidateOnAnimation()
     }
 

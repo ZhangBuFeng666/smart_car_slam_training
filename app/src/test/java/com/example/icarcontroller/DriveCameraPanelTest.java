@@ -2,6 +2,12 @@ package com.example.icarcontroller;
 
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import kotlin.Unit;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -15,6 +21,35 @@ public class DriveCameraPanelTest {
         assertPresentation(CameraViewState.MISSING, 0, "未检测到小车摄像头", true);
         assertPresentation(CameraViewState.DISCONNECTED, 0, "连接中断", true);
         assertPresentation(CameraViewState.IDLE, 0, "视频未启动", true);
+    }
+
+    @Test
+    public void errorOverlayIsCenteredWithoutAsymmetricInsets() {
+        CameraOverlayGeometry geometry = DriveCameraPanelKt.cameraErrorOverlayGeometry();
+
+        assertTrue(geometry.getCentered());
+        assertEquals(0, geometry.getStartInsetDp());
+        assertEquals(0, geometry.getTopInsetDp());
+        assertEquals(0, geometry.getEndInsetDp());
+        assertEquals(0, geometry.getBottomInsetDp());
+    }
+
+    @Test
+    public void controlledReparentBeginsBeforeTheViewIsRemoved() {
+        List<String> calls = new ArrayList<>();
+
+        DriveCameraPanelKt.performControlledReparent(
+                () -> {
+                    calls.add("beginReparent");
+                    return Unit.INSTANCE;
+                },
+                () -> {
+                    calls.add("removeView");
+                    return Unit.INSTANCE;
+                }
+        );
+
+        assertEquals(Arrays.asList("beginReparent", "removeView"), calls);
     }
 
     private static void assertPresentation(

@@ -17,6 +17,27 @@ data class CameraPresentation(
     val retryVisible: Boolean
 )
 
+data class CameraOverlayGeometry(
+    val centered: Boolean,
+    val startInsetDp: Int,
+    val topInsetDp: Int,
+    val endInsetDp: Int,
+    val bottomInsetDp: Int
+)
+
+fun cameraErrorOverlayGeometry(): CameraOverlayGeometry = CameraOverlayGeometry(
+    centered = true,
+    startInsetDp = 0,
+    topInsetDp = 0,
+    endInsetDp = 0,
+    bottomInsetDp = 0
+)
+
+fun performControlledReparent(beginReparent: () -> Unit, removeView: () -> Unit) {
+    beginReparent()
+    removeView()
+}
+
 fun cameraStatePresentation(snapshot: CameraViewSnapshot): CameraPresentation = when (snapshot.state) {
     CameraViewState.CONNECTING -> CameraPresentation("正在连接", false)
     CameraViewState.LIVE -> CameraPresentation("实时 · ${snapshot.fps} FPS", false)
@@ -91,6 +112,7 @@ class DriveCameraPanel(
     }
 
     init {
+        val errorOverlayGeometry = cameraErrorOverlayGeometry()
         background = panelBackground()
         clipChildren = false
         clipToPadding = false
@@ -118,9 +140,14 @@ class DriveCameraPanel(
         addView(errorState, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
-            Gravity.CENTER
+            if (errorOverlayGeometry.centered) Gravity.CENTER else Gravity.NO_GRAVITY
         ).apply {
-            setMargins(dp(24), dp(48), dp(24), dp(20))
+            setMargins(
+                dp(errorOverlayGeometry.startInsetDp),
+                dp(errorOverlayGeometry.topInsetDp),
+                dp(errorOverlayGeometry.endInsetDp),
+                dp(errorOverlayGeometry.bottomInsetDp)
+            )
         })
 
         render(CameraViewSnapshot(CameraViewState.IDLE))
@@ -153,12 +180,12 @@ class DriveCameraPanel(
     }
 
     fun streamViewForReparent(): MjpegStreamView {
-        (streamView.parent as? ViewGroup)?.removeView(streamView)
+        detachForReparent(streamView)
         return streamView
     }
 
     fun restoreStreamView(view: MjpegStreamView) {
-        (view.parent as? ViewGroup)?.removeView(view)
+        detachForReparent(view)
         streamView = view
         addView(view, 0, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -166,9 +193,6 @@ class DriveCameraPanel(
         ).apply {
             setMargins(dp(1), dp(1), dp(1), dp(1))
         })
-        if (streamRequested) {
-            streamUrl?.let { streamView.start(it, ::render) }
-        }
     }
 
     fun setOnFullscreenRequested(callback: (() -> Unit)?) {
@@ -190,6 +214,13 @@ class DriveCameraPanel(
         statusChip.text = presentation.text
         errorMessage.text = presentation.text
         errorState.visibility = if (presentation.retryVisible) View.VISIBLE else View.GONE
+    }
+
+    private fun detachForReparent(view: MjpegStreamView) {
+        val parent = view.parent as? ViewGroup ?: return
+        performControlledReparent(view::beginReparent) {
+            parent.removeView(view)
+        }
     }
 
     private fun panelBackground(): GradientDrawable = GradientDrawable().apply {

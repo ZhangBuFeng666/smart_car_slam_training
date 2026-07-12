@@ -121,6 +121,29 @@ public class InteractionSpecTest {
         assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"state\":\"busy\"} trailing"));
     }
 
+    @Test
+    public void cameraReparentGuardOnlySkipsTheArmedDetach() {
+        CameraReparentGuard guard = new CameraReparentGuard();
+
+        assertTrue(guard.shouldReleaseOnDetach());
+        guard.beginReparent();
+        assertFalse(guard.shouldReleaseOnDetach());
+        assertTrue(guard.shouldReleaseOnDetach());
+    }
+
+    @Test
+    public void cameraReparentGuardClearsOnAttachOrExplicitEnd() {
+        CameraReparentGuard guard = new CameraReparentGuard();
+
+        guard.beginReparent();
+        guard.onAttached();
+        assertTrue(guard.shouldReleaseOnDetach());
+
+        guard.beginReparent();
+        guard.endReparent();
+        assertTrue(guard.shouldReleaseOnDetach());
+    }
+
     private Object requiredSpec(String methodName) {
         try {
             Method method = InteractionSpec.class.getMethod(methodName);

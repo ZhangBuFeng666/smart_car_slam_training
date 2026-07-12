@@ -51,6 +51,7 @@ class MjpegStreamView @JvmOverloads constructor(
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val destination = RectF()
     private val reconnectDelaysMillis = InteractionSpec.cameraReconnectDelaysMillis()
+    private val reparentGuard = CameraReparentGuard()
 
     private var displayedBitmap: Bitmap? = null
     private var active = false
@@ -119,6 +120,14 @@ class MjpegStreamView @JvmOverloads constructor(
         scheduleAttempt(currentGeneration, retryIndex = 0, delayMillis = 0)
     }
 
+    fun beginReparent() {
+        reparentGuard.beginReparent()
+    }
+
+    fun endReparent() {
+        reparentGuard.endReparent()
+    }
+
     fun release() {
         val resources: WorkerResources
         synchronized(stateLock) {
@@ -132,8 +141,15 @@ class MjpegStreamView @JvmOverloads constructor(
         clearBitmapOnMain()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        reparentGuard.onAttached()
+    }
+
     override fun onDetachedFromWindow() {
-        release()
+        if (reparentGuard.shouldReleaseOnDetach()) {
+            release()
+        }
         super.onDetachedFromWindow()
     }
 

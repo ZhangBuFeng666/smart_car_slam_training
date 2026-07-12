@@ -329,3 +329,29 @@ object InteractionSpec {
 
     private data class ParsedJsonString(val value: String, val nextIndex: Int)
 }
+
+class CameraReparentGuard {
+    private var skipNextDetach = false
+
+    @Synchronized
+    fun beginReparent() {
+        skipNextDetach = true
+    }
+
+    @Synchronized
+    fun endReparent() {
+        skipNextDetach = false
+    }
+
+    @Synchronized
+    fun onAttached() {
+        skipNextDetach = false
+    }
+
+    @Synchronized
+    fun shouldReleaseOnDetach(): Boolean {
+        val shouldRelease = !skipNextDetach
+        skipNextDetach = false
+        return shouldRelease
+    }
+}

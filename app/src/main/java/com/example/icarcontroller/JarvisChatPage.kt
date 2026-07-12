@@ -125,7 +125,9 @@ class JarvisChatPage(
                     is JarvisChatItem.ProgressCard -> progressCard(item.mission, item.timeline)
                     is JarvisChatItem.ReportCard -> reportCard(item.report)
                     is JarvisChatItem.ErrorMessage -> errorCard(item.title, item.detail)
-                    is JarvisChatItem.SystemEvent -> systemRow(item.text)
+                    is JarvisChatItem.SystemEvent -> systemRow(
+                        if (state.loading) "贾维斯正在回复…" else item.text
+                    )
                 }
             )
         }

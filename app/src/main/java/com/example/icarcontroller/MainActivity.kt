@@ -62,6 +62,7 @@ private data class FullscreenAccessibilityState(
 )
 
 class MainActivity : Activity() {
+    private lateinit var pageHost: FrameLayout
     private lateinit var pageContent: LinearLayout
     private lateinit var scrollContent: ScrollView
     private lateinit var topBar: LinearLayout
@@ -69,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var txtAppTitle: TextView
     private lateinit var txtStatusPill: TextView
     private lateinit var globalThemeToggle: TextView
+    private var jarvisChatPage: JarvisChatPage? = null
     private lateinit var navViews: Map<String, TextView>
     private lateinit var parkingThemeStore: ParkingThemeStore
     private lateinit var jarvisCredentials: JarvisCredentials
@@ -126,6 +128,7 @@ class MainActivity : Activity() {
         jarvisCredentials = JarvisCredentials(this)
         jarvisToken = jarvisCredentials.loadToken()
 
+        pageHost = findViewById(R.id.pageHost)
         pageContent = findViewById(R.id.pageContent)
         scrollContent = findViewById(R.id.scrollContent)
         scrollContent.isVerticalScrollBarEnabled = false
@@ -223,6 +226,9 @@ class MainActivity : Activity() {
         portInput = null
 
         pageContent.removeAllViews()
+        jarvisChatPage?.let(pageHost::removeView)
+        jarvisChatPage = null
+        scrollContent.visibility = if (key == "ai") View.GONE else View.VISIBLE
         pageContent.layoutParams = pageContent.layoutParams.apply {
             height = if (key == "ai") ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT
         }
@@ -435,7 +441,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderAiPage() {
-        pageContent.addView(JarvisChatPage(
+        jarvisChatPage = JarvisChatPage(
             context = this,
             host = currentHost,
             themeMode = parkingThemeMode,
@@ -444,11 +450,14 @@ class MainActivity : Activity() {
             onEmergencyStop = {
                 sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)
             }
-        ), LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        ))
+        ).also { chatPage ->
+            pageHost.addView(chatPage, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                setMargins(dp(14), 0, dp(14), 0)
+            })
+        }
     }
 
     private fun renderVision() {
@@ -487,6 +496,7 @@ class MainActivity : Activity() {
         topBar.visibility = View.VISIBLE
         val palette = parkingPalette()
         val useDarkChrome = parkingThemeMode == ParkingThemeMode.DARK
+        pageHost.setBackgroundColor(color(palette.background))
         scrollContent.setBackgroundColor(color(palette.background))
         window.statusBarColor = color(palette.background)
         window.navigationBarColor = color(palette.surface)

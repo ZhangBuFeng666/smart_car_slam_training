@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from jarvis_agent.api import create_app
 from jarvis_agent.config import Settings
+from jarvis_agent.deepseek import ModelResponseError
 from jarvis_agent.models import Action, MissionPlan, MissionStep
 
 
@@ -16,6 +17,11 @@ class FakePlanner:
                 MissionStep(action=Action.START_TASK, arguments={"task": "camera"}),
             ],
         )
+
+
+class InvalidPlanner:
+    async def plan(self, message, context):
+        raise ModelResponseError("invalid plan")
 
 
 class FakeControl:
@@ -92,6 +98,28 @@ def test_chat_returns_validated_plan(tmp_path):
     assert response.status_code == 200
     assert response.json()["plan"]["requires_confirmation"] is True
     assert response.json()["plan"]["steps"][1]["arguments"] == {"task": "camera"}
+
+
+def test_chat_falls_back_when_model_returns_invalid_plan(tmp_path):
+    control = FakeControl()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    test_client = TestClient(
+        create_app(settings=settings, planner=InvalidPlanner(), control=control)
+    )
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "start an unsafe unknown task", "context": {}},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["plan"]["steps"][0]["action"] == "ASK_USER"
+    assert "start an unsafe unknown task" in body["plan"]["steps"][0]["arguments"]["question"]
 
 
 def test_mission_create_confirm_poll_and_timeline(tmp_path):

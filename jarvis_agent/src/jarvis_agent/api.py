@@ -1,4 +1,5 @@
 import secrets
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -24,11 +25,16 @@ from jarvis_agent.models import (
     DecisionRequest,
     MissionCreateRequest,
     MissionState,
+    MissionPlan,
+    MissionStep,
+    Action,
     VisionEvent,
 )
 from jarvis_agent.reporting import ReportService
 from jarvis_agent.repository import Repository
 from jarvis_agent.validator import PlanValidationError, validate_plan
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorBody(BaseModel):
@@ -93,7 +99,8 @@ def create_app(
         except ModelUnavailableError as exc:
             raise _http_error(503, "MODEL_UNAVAILABLE", "Model is unavailable") from exc
         except (ModelResponseError, PlanValidationError) as exc:
-            raise _http_error(502, "MODEL_RESPONSE_INVALID", "Model returned invalid plan") from exc
+            logger.warning("Model returned invalid plan; falling back to clarification", exc_info=exc)
+            plan = _fallback_clarification_plan(request.message)
         return ChatResponse(reply="Plan ready for confirmation.", plan=plan)
 
     @app.post("/api/v1/missions", dependencies=[Depends(require_auth)])
@@ -176,4 +183,24 @@ def _http_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status_code,
         detail={"error": {"code": code, "message": message}},
+    )
+
+
+def _fallback_clarification_plan(message: str) -> MissionPlan:
+    return MissionPlan(
+        summary="Jarvis could not safely convert the request into an executable plan.",
+        steps=[
+            MissionStep(
+                action=Action.ASK_USER,
+                arguments={
+                    "question": (
+                        "我理解你的请求是：%s。为了安全执行，请换一种更明确的说法，"
+                        "例如：检查状态、打开摄像头、开始避障、生成巡检报告。"
+                    )
+                    % message.strip()
+                },
+            )
+        ],
+        completion_criteria=["User provides a clearer patrol or control instruction."],
+        requires_confirmation=False,
     )

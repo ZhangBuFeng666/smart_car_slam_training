@@ -74,6 +74,23 @@ public class JarvisStateTest {
     }
 
     @Test
+    public void chatReplyAppendsOnlyAssistantMessage() {
+        JarvisViewState state = JarvisReducer.reduce(
+                JarvisViewState.Companion.initial(),
+                new JarvisEvent.UserMessageSubmitted("你好")
+        );
+
+        JarvisViewState next = JarvisReducer.reduce(
+                state,
+                new JarvisEvent.ChatReply("你好，我在。有什么可以帮你？")
+        );
+
+        assertFalse(next.getLoading());
+        assertEquals(2, next.getChatItems().size());
+        assertTrue(next.getChatItems().get(1) instanceof JarvisChatItem.AssistantMessage);
+    }
+
+    @Test
     public void missionRunningStoresMissionAndTimeline() {
         JarvisMission mission = TestFixtures.mission(JarvisMissionState.RUNNING);
         JarvisTimelineEntry entry = TestFixtures.timeline();

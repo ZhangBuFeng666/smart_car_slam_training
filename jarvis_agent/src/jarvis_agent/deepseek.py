@@ -47,6 +47,33 @@ class DeepSeekPlanner:
         response = await self._post_with_retry(payload)
         return _parse_plan_response(response)
 
+    async def reply(self, message: str, context: Dict[str, Any]) -> str:
+        if not self.settings.deepseek_configured:
+            raise ModelUnavailableError("DeepSeek API key is not configured")
+
+        payload = {
+            "model": self.settings.deepseek_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是贾维斯，小车的多模态巡检助手。正常、自然、简洁地聊天。"
+                        "不要生成任务计划、步骤或确认卡；只有用户明确说‘生成计划’时才由另一个流程处理。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"message": message, "context": context},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "temperature": 0.7,
+        }
+        response = await self._post_with_retry(payload)
+        return _parse_chat_response(response)
+
     async def _post_with_retry(self, payload: Dict[str, Any]) -> httpx.Response:
         last_timeout = None
         for _ in range(2):
@@ -100,6 +127,16 @@ def _parse_plan_response(response: httpx.Response) -> MissionPlan:
         raise ModelResponseError("DeepSeek returned malformed JSON") from exc
     except (ValidationError, PlanValidationError) as exc:
         raise ModelResponseError("DeepSeek returned an invalid plan") from exc
+
+
+def _parse_chat_response(response: httpx.Response) -> str:
+    try:
+        reply = response.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise ModelResponseError("DeepSeek returned a malformed chat response") from exc
+    if not reply:
+        raise ModelResponseError("DeepSeek returned an empty chat response")
+    return reply
 
 
 def _strip_markdown_fence(content: str) -> str:

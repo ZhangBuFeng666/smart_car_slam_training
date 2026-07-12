@@ -147,10 +147,16 @@ class JarvisChatPage(
             val result = runCatching { JarvisApi(host, savedToken).chat(message) }
             runOnUiThread {
                 result.fold(
-                    onSuccess = { plan ->
-                        currentPlan = plan
-                        state = JarvisReducer.reduce(state, JarvisEvent.PlanReady(plan))
-                        onStatus("Jarvis 计划已生成")
+                    onSuccess = { response ->
+                        val plan = response.plan
+                        if (plan == null) {
+                            state = JarvisReducer.reduce(state, JarvisEvent.ChatReply(response.reply))
+                            onStatus("Jarvis")
+                        } else {
+                            currentPlan = plan
+                            state = JarvisReducer.reduce(state, JarvisEvent.PlanReady(plan))
+                            onStatus("Jarvis 计划已生成")
+                        }
                     },
                     onFailure = { error ->
                         state = JarvisReducer.reduce(state, JarvisEvent.NetworkFailed(error.message ?: error.javaClass.simpleName))
@@ -323,7 +329,8 @@ class JarvisChatPage(
             setLineSpacing(dp(2).toFloat(), 1.0f)
             background = rounded(bg, border, 18)
             setPadding(dp(12), dp(9), dp(12), dp(9))
-        }, LayoutParams((resources.displayMetrics.widthPixels * 0.72f).toInt(), LayoutParams.WRAP_CONTENT))
+            maxWidth = (resources.displayMetrics.widthPixels * 0.72f).toInt()
+        }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         layoutParams = lp(top = 6, bottom = 6)
     }
 

@@ -1419,7 +1419,13 @@ class MainActivity : Activity() {
                     val result = runCatching { JarvisApi(currentHost, token).chat(mission) }
                     runOnUiThread {
                         result.fold(
-                            onSuccess = { plan ->
+                            onSuccess = { response ->
+                                val plan = response.plan
+                                if (plan == null) {
+                                    setStatus("Jarvis")
+                                    appendLog("Jarvis：${response.reply}")
+                                    return@fold
+                                }
                                 jarvisCurrentPlan = plan
                                 timeline.removeAllViews()
                                 plan.steps.forEachIndexed { index, step ->

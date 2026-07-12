@@ -70,7 +70,7 @@ def test_simulated_patrol_workflow_reaches_report(tmp_path):
     chat = client.post(
         "/api/v1/chat",
         headers=auth(),
-        json={"message": "patrol the parking lot", "context": {}},
+        json={"message": "create plan: patrol the parking lot", "context": {}},
     )
     mission = client.post(
         "/api/v1/missions",

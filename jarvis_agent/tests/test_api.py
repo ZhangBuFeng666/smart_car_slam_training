@@ -9,7 +9,11 @@ from jarvis_agent.models import Action, MissionPlan, MissionStep
 
 
 class FakePlanner:
+    def __init__(self):
+        self.calls = []
+
     async def plan(self, message, context):
+        self.calls.append((message, context))
         return MissionPlan(
             summary="Start camera patrol",
             steps=[
@@ -17,6 +21,9 @@ class FakePlanner:
                 MissionStep(action=Action.START_TASK, arguments={"task": "camera"}),
             ],
         )
+
+    async def reply(self, message, context):
+        return "你好，我在。有什么可以帮你？"
 
 
 class InvalidPlanner:
@@ -92,12 +99,54 @@ def test_chat_returns_validated_plan(tmp_path):
     response = test_client.post(
         "/api/v1/chat",
         headers=auth(),
-        json={"message": "start patrol", "context": {"car": "online"}},
+        json={"message": "生成计划：start patrol", "context": {"car": "online"}},
     )
 
     assert response.status_code == 200
     assert response.json()["plan"]["requires_confirmation"] is True
     assert response.json()["plan"]["steps"][1]["arguments"] == {"task": "camera"}
+
+
+def test_chat_greeting_returns_reply_without_plan(tmp_path):
+    planner = FakePlanner()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    test_client = TestClient(
+        create_app(settings=settings, planner=planner, control=FakeControl())
+    )
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "你好", "context": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"reply": "你好，我在。有什么可以帮你？", "plan": None}
+    assert planner.calls == []
+
+
+def test_chat_only_plans_when_explicitly_requested(tmp_path):
+    planner = FakePlanner()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    test_client = TestClient(
+        create_app(settings=settings, planner=planner, control=FakeControl())
+    )
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "帮我看看摄像头能做什么", "context": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plan"] is None
+    assert planner.calls == []
 
 
 def test_chat_falls_back_when_model_returns_invalid_plan(tmp_path):
@@ -113,7 +162,7 @@ def test_chat_falls_back_when_model_returns_invalid_plan(tmp_path):
     response = test_client.post(
         "/api/v1/chat",
         headers=auth(),
-        json={"message": "start an unsafe unknown task", "context": {}},
+        json={"message": "生成计划：start an unsafe unknown task", "context": {}},
     )
 
     body = response.json()

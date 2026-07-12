@@ -92,6 +92,12 @@ def create_app(
         dependencies=[Depends(require_auth)],
     )
     async def chat(request: ChatRequest):
+        if not _is_task_request(request.message):
+            try:
+                reply = await planner.reply(request.message, request.context)
+            except (AttributeError, ModelTimeoutError, ModelUnavailableError, ModelResponseError):
+                reply = _casual_reply(request.message)
+            return ChatResponse(reply=reply, plan=None)
         try:
             plan = validate_plan(await planner.plan(request.message, request.context))
         except ModelTimeoutError as exc:
@@ -204,3 +210,17 @@ def _fallback_clarification_plan(message: str) -> MissionPlan:
         completion_criteria=["User provides a clearer patrol or control instruction."],
         requires_confirmation=False,
     )
+
+
+def _is_task_request(message: str) -> bool:
+    text = message.strip().lower()
+    return "生成计划" in text or "create plan" in text
+
+
+def _casual_reply(message: str) -> str:
+    text = message.strip().lower()
+    if text in {"你好", "您好", "嗨", "hello", "hi", "在吗"}:
+        return "你好，我在。有什么可以帮你？"
+    if "你是谁" in text or "叫什么" in text:
+        return "我是贾维斯，小车的多模态巡检助手。"
+    return "我在听。你可以直接告诉我想聊什么，或者给我一个具体的巡检任务。"

@@ -60,6 +60,7 @@ sealed class JarvisEvent {
     object ConfirmationStarted : JarvisEvent()
     data class UserMessageSubmitted(val message: String) : JarvisEvent()
     data class SystemMessageAdded(val message: String) : JarvisEvent()
+    data class ChatReply(val message: String) : JarvisEvent()
     data class PlanReady(val plan: JarvisMissionPlan) : JarvisEvent()
     data class MissionUpdated(
         val mission: JarvisMission,
@@ -95,6 +96,13 @@ object JarvisReducer {
             )
             is JarvisEvent.SystemMessageAdded -> state.copy(
                 chatItems = state.chatItems + JarvisChatItem.SystemEvent(event.message, timestamp())
+            )
+            is JarvisEvent.ChatReply -> state.copy(
+                mode = JarvisScreenMode.IDLE,
+                loading = false,
+                errorMessage = null,
+                chatItems = withoutTrailingLoading(state.chatItems) +
+                    JarvisChatItem.AssistantMessage(event.message, timestamp())
             )
             is JarvisEvent.PlanReady -> state.copy(
                 mode = JarvisScreenMode.PLAN_READY,

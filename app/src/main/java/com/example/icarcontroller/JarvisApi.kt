@@ -7,6 +7,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
+data class JarvisChatResponse(
+    val reply: String,
+    val plan: JarvisMissionPlan?
+)
+
 class JarvisApi @JvmOverloads constructor(
     host: String,
     private val token: String,
@@ -25,12 +30,13 @@ class JarvisApi @JvmOverloads constructor(
 
     fun authorizationHeader(): String = "Bearer $token"
 
-    fun chat(message: String, context: JSONObject = JSONObject()): JarvisMissionPlan {
+    fun chat(message: String, context: JSONObject = JSONObject()): JarvisChatResponse {
         val body = JSONObject()
             .put("message", message)
             .put("context", context)
         val response = request("POST", "$baseUrl/api/v1/chat", body)
-        return JarvisJson.parsePlan(response.getJSONObject("plan"))
+        val plan = if (response.isNull("plan")) null else JarvisJson.parsePlan(response.getJSONObject("plan"))
+        return JarvisChatResponse(response.optString("reply"), plan)
     }
 
     fun createMission(plan: JarvisMissionPlan): JarvisMission {

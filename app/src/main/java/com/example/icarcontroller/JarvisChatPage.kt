@@ -20,10 +20,12 @@ import java.util.concurrent.ExecutorService
 class JarvisChatPage(
     context: Context,
     private val host: String,
+    private val themeMode: ParkingThemeMode,
     private val executor: ExecutorService,
     private val onStatus: (String) -> Unit,
     private val onEmergencyStop: () -> Unit,
 ) : LinearLayout(context) {
+    private val palette = ParkingThemeSpec.palette(themeMode)
     private val credentials = JarvisCredentials(context)
     private var token = credentials.loadToken()
     private var missionId: String? = null
@@ -45,9 +47,9 @@ class JarvisChatPage(
         hint = "告诉贾维斯要巡检哪里..."
         minLines = 1
         maxLines = 4
-        setTextColor(color("#F6F1D8"))
-        setHintTextColor(color("#8F907F"))
-        background = rounded("#171A12", "#3A3829", 18)
+        setTextColor(color(palette.textPrimary))
+        setHintTextColor(color(palette.textSecondary))
+        background = rounded(palette.surface, palette.border, 18)
         setPadding(dp(12), dp(10), dp(12), dp(10))
     }
     private val tokenInput = EditText(context).apply {
@@ -55,9 +57,9 @@ class JarvisChatPage(
         setText(token)
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         setSingleLine(true)
-        setTextColor(color("#F6F1D8"))
-        setHintTextColor(color("#8F907F"))
-        background = rounded("#171A12", "#3A3829", 14)
+        setTextColor(color(palette.textPrimary))
+        setHintTextColor(color(palette.textSecondary))
+        background = rounded(palette.surface, palette.border, 14)
         setPadding(dp(10), dp(7), dp(10), dp(7))
     }
 
@@ -78,28 +80,28 @@ class JarvisChatPage(
 
     private fun statusBar(): LinearLayout = LinearLayout(context).apply {
         orientation = VERTICAL
-        background = rounded("#14170F", "#3A3829", 20)
+        background = rounded(palette.surface, palette.border, 20)
         setPadding(dp(14), dp(12), dp(14), dp(12))
         addView(TextView(context).apply {
             text = "JARVIS"
-            setTextColor(color("#F6F1D8"))
+            setTextColor(color(palette.textPrimary))
             textSize = 18f
             letterSpacing = 0.12f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         })
         addView(TextView(context).apply {
             text = "Jetson $host:8100 · ${if (token.isBlank()) "Token 未配置" else "Token 已配置"} · 控制服务 8000 由 Jarvis 接管"
-            setTextColor(color("#AAA68F"))
+            setTextColor(color(palette.textSecondary))
             textSize = 11f
         })
         addView(LinearLayout(context).apply {
             orientation = HORIZONTAL
-            addView(chip("AGENT 8100", "#D8C985"))
-            addView(chip("SAFE CONFIRM", "#B8C878"), LayoutParams(
+            addView(chip("AGENT 8100", palette.accentText))
+            addView(chip("SAFE CONFIRM", successAccent()), LayoutParams(
                 LayoutParams.WRAP_CONTENT,
                 LayoutParams.WRAP_CONTENT
             ).apply { setMargins(dp(8), 0, 0, 0) })
-            addView(chip("CAR API 8000", "#D6B05D"), LayoutParams(
+            addView(chip("CAR API 8000", warningAccent()), LayoutParams(
                 LayoutParams.WRAP_CONTENT,
                 LayoutParams.WRAP_CONTENT
             ).apply { setMargins(dp(8), 0, 0, 0) })
@@ -110,7 +112,7 @@ class JarvisChatPage(
 
     private fun composer(): LinearLayout = LinearLayout(context).apply {
         orientation = VERTICAL
-        background = rounded("#14170F", "#3A3829", 20)
+        background = rounded(palette.surface, palette.border, 20)
         setPadding(dp(12), dp(12), dp(12), dp(12))
         addView(tokenInput, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dp(8))
@@ -147,9 +149,9 @@ class JarvisChatPage(
 
     private fun promptChip(prompt: String): TextView = TextView(context).apply {
         text = prompt
-        setTextColor(color("#F6F1D8"))
+        setTextColor(color(palette.textPrimary))
         textSize = 11f
-        background = rounded("#24251B", "#6E6846", 14)
+        background = rounded(palette.surfaceAlt, palette.border, 14)
         setPadding(dp(10), dp(7), dp(10), dp(7))
         isClickable = true
         setOnClickListener {
@@ -165,8 +167,8 @@ class JarvisChatPage(
         state.chatItems.forEach { item ->
             chatList.addView(
                 when (item) {
-                    is JarvisChatItem.UserMessage -> bubble(item.text, Gravity.END, "#38351F", "#D8C985")
-                    is JarvisChatItem.AssistantMessage -> bubble(item.text, Gravity.START, "#1A1E16", "#3A3829")
+                    is JarvisChatItem.UserMessage -> bubble(item.text, Gravity.END, palette.accentSoft, palette.accent)
+                    is JarvisChatItem.AssistantMessage -> bubble(item.text, Gravity.START, palette.surface, palette.border)
                     is JarvisChatItem.PlanCard -> planCard(item.plan)
                     is JarvisChatItem.ProgressCard -> progressCard(item.mission, item.timeline)
                     is JarvisChatItem.ReportCard -> reportCard(item.report)
@@ -316,7 +318,7 @@ class JarvisChatPage(
         }
     }
 
-    private fun planCard(plan: JarvisMissionPlan): LinearLayout = card("任务计划", "等待确认", "#D8C985").apply {
+    private fun planCard(plan: JarvisMissionPlan): LinearLayout = card("任务计划", "等待确认", palette.accentText).apply {
         addView(body(plan.summary), lp(top = 8))
         addView(listBlock("计划步骤", plan.steps.mapIndexed { index, step ->
             val args = if (step.arguments.isEmpty()) "" else " " + step.arguments.entries.joinToString(", ") { "${it.key}=${it.value}" }
@@ -335,7 +337,7 @@ class JarvisChatPage(
     }
 
     private fun progressCard(mission: JarvisMission, timeline: List<JarvisTimelineEntry>): LinearLayout =
-        card("任务进度", mission.state.name, "#B8C878").apply {
+        card("任务进度", mission.state.name, successAccent()).apply {
             addView(body("Mission ${mission.id} · 当前状态 ${mission.state.name}"), lp(top = 8))
             val rows = timeline.ifEmpty {
                 listOf(JarvisTimelineEntry("", mission.id, "", "state", "等待任务事件", emptyMap()))
@@ -348,7 +350,7 @@ class JarvisChatPage(
             }, lp(top = 12))
         }
 
-    private fun reportCard(report: JarvisReport): LinearLayout = card("巡检报告", report.createdAt, "#D6B05D").apply {
+    private fun reportCard(report: JarvisReport): LinearLayout = card("巡检报告", report.createdAt, warningAccent()).apply {
         addView(body(report.markdown.lineSequence().take(5).joinToString("\n")), lp(top = 8))
         addView(primaryButton("查看完整报告") {
             state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded(report.markdown))
@@ -356,7 +358,7 @@ class JarvisChatPage(
         }, LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply { setMargins(0, dp(12), 0, 0) })
     }
 
-    private fun errorCard(title: String, detail: String): LinearLayout = card(title, "ERROR", "#D46A5C").apply {
+    private fun errorCard(title: String, detail: String): LinearLayout = card(title, "ERROR", palette.danger).apply {
         addView(body(detail), lp(top = 8))
     }
 
@@ -364,7 +366,7 @@ class JarvisChatPage(
         gravity = gravityValue
         addView(TextView(context).apply {
             text = textValue
-            setTextColor(color("#F7F3DE"))
+            setTextColor(color(palette.textPrimary))
             textSize = 13f
             setLineSpacing(dp(2).toFloat(), 1.0f)
             background = rounded(bg, border, 18)
@@ -376,21 +378,21 @@ class JarvisChatPage(
     private fun systemRow(textValue: String): TextView = TextView(context).apply {
         text = textValue
         gravity = Gravity.CENTER
-        setTextColor(color("#AAA68F"))
+        setTextColor(color(palette.textSecondary))
         textSize = 11f
         setPadding(0, dp(8), 0, dp(8))
     }
 
     private fun card(title: String, status: String, accent: String): LinearLayout = LinearLayout(context).apply {
         orientation = VERTICAL
-        background = rounded("#171A12", "#3A3829", 18)
+        background = rounded(palette.surface, palette.border, 18)
         setPadding(dp(13), dp(12), dp(13), dp(12))
         addView(LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(context).apply {
                 text = title
-                setTextColor(color("#F6F1D8"))
+                setTextColor(color(palette.textPrimary))
                 textSize = 15f
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
@@ -403,14 +405,14 @@ class JarvisChatPage(
         orientation = VERTICAL
         addView(TextView(context).apply {
             text = title
-            setTextColor(color("#D8C985"))
+            setTextColor(color(palette.accentText))
             textSize = 11f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         })
         rows.forEach { row ->
             addView(TextView(context).apply {
                 text = row
-                setTextColor(color("#F6F1D8"))
+                setTextColor(color(palette.textPrimary))
                 textSize = 12f
                 setPadding(0, dp(4), 0, 0)
             })
@@ -419,7 +421,7 @@ class JarvisChatPage(
 
     private fun body(textValue: String): TextView = TextView(context).apply {
         text = textValue
-        setTextColor(color("#C9C4AA"))
+        setTextColor(color(palette.textSecondary))
         textSize = 12f
         setLineSpacing(dp(2).toFloat(), 1.0f)
     }
@@ -429,7 +431,7 @@ class JarvisChatPage(
         setTextColor(color(accent))
         textSize = 9f
         setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-        background = rounded("#24251B", accent, 12)
+        background = rounded(palette.accentSoft, accent, 12)
         setPadding(dp(8), dp(5), dp(8), dp(5))
     }
 
@@ -437,15 +439,15 @@ class JarvisChatPage(
         text = textValue
         setTextColor(Color.WHITE)
         textSize = 12f
-        background = rounded("#6B5F2A", "#D8C985", 16)
+        background = rounded(palette.accent, palette.accentText, 16)
         setOnClickListener { action() }
     }
 
     private fun outlineButton(textValue: String, action: () -> Unit): Button = Button(context).apply {
         text = textValue
-        setTextColor(color("#F6F1D8"))
+        setTextColor(color(palette.textPrimary))
         textSize = 12f
-        background = rounded("#24251B", "#6E6846", 16)
+        background = rounded(palette.surfaceAlt, palette.border, 16)
         setOnClickListener { action() }
     }
 
@@ -479,4 +481,10 @@ class JarvisChatPage(
     private fun color(hex: String): Int = Color.parseColor(hex)
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun successAccent(): String =
+        if (themeMode == ParkingThemeMode.LIGHT) "#2F8F5B" else "#B8C878"
+
+    private fun warningAccent(): String =
+        if (themeMode == ParkingThemeMode.LIGHT) "#A87516" else "#D6B05D"
 }

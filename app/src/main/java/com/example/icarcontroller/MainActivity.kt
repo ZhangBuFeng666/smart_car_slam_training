@@ -426,6 +426,7 @@ class MainActivity : Activity() {
         pageContent.addView(JarvisChatPage(
             context = this,
             host = currentHost,
+            themeMode = parkingThemeMode,
             executor = commandExecutor,
             onStatus = { status -> setStatus(status) },
             onEmergencyStop = {

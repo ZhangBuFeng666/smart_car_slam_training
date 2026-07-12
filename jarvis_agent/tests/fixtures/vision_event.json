@@ -1,0 +1,18 @@
+{
+  "mission_id": "mission-001",
+  "source": "front_camera",
+  "event_type": "object_detected",
+  "label": "person",
+  "confidence": 0.94,
+  "position": {
+    "x": 0.42,
+    "y": 0.58
+  },
+  "track_id": "track-007",
+  "image_path": "/var/lib/jarvis/events/mission-001/person-001.jpg",
+  "timestamp": "2026-01-15T10:30:00+08:00",
+  "metadata": {
+    "camera_id": "front-camera-01",
+    "frame_id": 1284
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "mission_id": "mission-001",
+  "summary": "Start camera monitoring and obstacle avoidance after checking system status.",
+  "steps": [
+    {
+      "action": "CHECK_STATUS"
+    },
+    {
+      "action": "START_TASK",
+      "task": "camera"
+    },
+    {
+      "action": "START_TASK",
+      "task": "avoidance"
+    }
+  ],
+  "completion_criteria": [
+    "Camera monitoring is active.",
+    "Obstacle avoidance is active."
+  ],
+  "requires_confirmation": true
+}

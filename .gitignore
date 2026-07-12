@@ -20,6 +20,7 @@ __pycache__/
 
 # Local design-tool previews and runtime state
 .superpowers/
+.worktrees/
 
 # OS
 Thumbs.db

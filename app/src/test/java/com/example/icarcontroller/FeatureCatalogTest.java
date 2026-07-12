@@ -12,7 +12,7 @@ public class FeatureCatalogTest {
         assertEquals(5, FeatureCatalog.primaryPages().size());
         assertEquals("钥匙", FeatureCatalog.primaryPages().get(0).getTitle());
         assertEquals("驾驶", FeatureCatalog.primaryPages().get(1).getTitle());
-        assertEquals("AI", FeatureCatalog.primaryPages().get(2).getTitle());
+        assertEquals("贾维斯", FeatureCatalog.primaryPages().get(2).getTitle());
         assertEquals("ai", FeatureCatalog.primaryPages().get(2).getKey());
         assertEquals("视觉", FeatureCatalog.primaryPages().get(3).getTitle());
         assertEquals("导航", FeatureCatalog.primaryPages().get(4).getTitle());
@@ -23,6 +23,11 @@ public class FeatureCatalogTest {
         assertTrue(FeatureCatalog.keyActions().stream().anyMatch(item -> item.getKey().equals("ai")));
         assertTrue(FeatureCatalog.primaryPages().stream().anyMatch(page -> page.getKey().equals("ai")));
         assertFalse(FeatureCatalog.primaryPages().stream().anyMatch(page -> page.getKey().equals("tasks")));
+        assertEquals("可用", FeatureCatalog.homeHighlights().stream()
+                .filter(item -> item.getKey().equals("ai"))
+                .findFirst()
+                .get()
+                .getStatus());
     }
 
     @Test

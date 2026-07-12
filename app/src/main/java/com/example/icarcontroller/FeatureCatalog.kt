@@ -5,25 +5,25 @@ object FeatureCatalog {
     fun primaryPages(): List<AppPage> = listOf(
         AppPage("home", "钥匙", "数字车钥匙与常用入口"),
         AppPage("drive", "驾驶", "停车场人工接管"),
-        AppPage("ai", "AI", "停车场复合任务"),
+        AppPage("ai", "贾维斯", "多模态巡检智能体"),
         AppPage("vision", "视觉", "车位、车辆与禁停检测"),
         AppPage("nav", "导航", "B2 地图与巡逻路线")
     )
 
     @JvmStatic
     fun keyActions(): List<FeatureItem> = listOf(
-        FeatureItem("drive", "驾驶", "进入遥控盘", "主控"),
+        FeatureItem("drive", "驾驶", "进入遥控面板", "主控"),
         FeatureItem("base", "底盘", "启动驱动", "必要"),
         FeatureItem("avoidance", "避障", "雷达避障", "实训"),
         FeatureItem("nav", "建图", "SLAM 流程", "流程"),
-        FeatureItem("ai", "AI", "任务规划", "预留")
+        FeatureItem("ai", "贾维斯", "巡检智能体", "可用")
     )
 
     @JvmStatic
     fun homeHighlights(): List<FeatureItem> = listOf(
         FeatureItem("drive", "开始驾驶", "进入遥控页面，按住方向即可控制小车", "可用"),
         FeatureItem("avoidance", "自动避障", "启动雷达避障实验，适合快速展示", "可用"),
-        FeatureItem("ai", "AI 智能助手", "预留自然语言任务规划入口", "规划中"),
+        FeatureItem("ai", "贾维斯巡检", "自然语言规划、事件决策和巡检报告", "可用"),
         FeatureItem("vision", "视觉能力", "模型训练完成后接入识别与检测", "训练中")
     )
 
@@ -51,7 +51,7 @@ object FeatureCatalog {
     fun navigationFeatures(): List<FeatureItem> = listOf(
         FeatureItem("mapping", "SLAM 建图", "启动 Gmapping，缓慢移动小车扫描环境", "可接入"),
         FeatureItem("save_map", "保存地图", "保存 yahboomcar.pgm 和 yahboomcar.yaml", "可接入"),
-        FeatureItem("planning", "路径规划", "Nav2 收到目标点后由 planner_server 自动生成路线", "可接入"),
+        FeatureItem("planning", "路径规划", "Nav2 收到目标点后由 planner_server 生成路线", "可接入"),
         FeatureItem("auto_nav", "自动导航", "DWA 或 TEB 控制器跟随规划路线行驶", "可接入")
     )
 

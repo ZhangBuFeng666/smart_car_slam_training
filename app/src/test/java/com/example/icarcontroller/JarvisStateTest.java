@@ -45,6 +45,35 @@ public class JarvisStateTest {
     }
 
     @Test
+    public void chatMessageAppendsUserAndLoadingEvent() {
+        JarvisViewState state = JarvisReducer.reduce(
+                JarvisViewState.Companion.initial(),
+                new JarvisEvent.UserMessageSubmitted("巡检 B2 东侧停车区")
+        );
+
+        assertEquals(2, state.getChatItems().size());
+        assertTrue(state.getChatItems().get(0) instanceof JarvisChatItem.UserMessage);
+        assertTrue(state.getChatItems().get(1) instanceof JarvisChatItem.SystemEvent);
+        assertTrue(state.getLoading());
+    }
+
+    @Test
+    public void planReadyAppendsAssistantAndPlanCard() {
+        JarvisViewState state = JarvisReducer.reduce(
+                JarvisViewState.Companion.initial(),
+                new JarvisEvent.UserMessageSubmitted("打开摄像头")
+        );
+        JarvisMissionPlan plan = TestFixtures.plan();
+
+        JarvisViewState next = JarvisReducer.reduce(state, new JarvisEvent.PlanReady(plan));
+
+        assertFalse(next.getLoading());
+        assertEquals(plan, next.getPlan());
+        assertTrue(next.getChatItems().get(next.getChatItems().size() - 2) instanceof JarvisChatItem.AssistantMessage);
+        assertTrue(next.getChatItems().get(next.getChatItems().size() - 1) instanceof JarvisChatItem.PlanCard);
+    }
+
+    @Test
     public void missionRunningStoresMissionAndTimeline() {
         JarvisMission mission = TestFixtures.mission(JarvisMissionState.RUNNING);
         JarvisTimelineEntry entry = TestFixtures.timeline();
@@ -57,6 +86,7 @@ public class JarvisStateTest {
         assertEquals(JarvisScreenMode.RUNNING, state.getMode());
         assertEquals("mission-001", state.getMissionId());
         assertEquals(1, state.getTimeline().size());
+        assertTrue(state.getChatItems().get(state.getChatItems().size() - 1) instanceof JarvisChatItem.ProgressCard);
     }
 
     @Test
@@ -83,6 +113,7 @@ public class JarvisStateTest {
 
         assertEquals(JarvisScreenMode.REPORT_READY, state.getMode());
         assertEquals(report, state.getReport());
+        assertTrue(state.getChatItems().get(state.getChatItems().size() - 1) instanceof JarvisChatItem.ReportCard);
     }
 
     @Test
@@ -95,6 +126,7 @@ public class JarvisStateTest {
         assertTrue(state.getEmergencyStopAvailable());
         assertEquals("timeout", state.getErrorMessage());
         assertFalse(state.getLoading());
+        assertTrue(state.getChatItems().get(state.getChatItems().size() - 1) instanceof JarvisChatItem.ErrorMessage);
     }
 
     private static class TestFixtures {

@@ -145,11 +145,16 @@ object InteractionSpec {
             return null
         }
         index += 1
+        var requestedValue: String? = null
 
         while (true) {
             index = skipWhitespace(json, index)
-            if (index >= json.length || json[index] == '}') {
+            if (index >= json.length) {
                 return null
+            }
+            if (json[index] == '}') {
+                val endIndex = skipWhitespace(json, index + 1)
+                return if (endIndex == json.length) requestedValue else null
             }
             val key = parseJsonString(json, index) ?: return null
             index = skipWhitespace(json, key.nextIndex)
@@ -158,21 +163,22 @@ object InteractionSpec {
             }
             index = skipWhitespace(json, index + 1)
 
-            if (key.value == requestedKey) {
+            if (key.value == requestedKey && index < json.length && json[index] == '"') {
                 val value = parseJsonString(json, index) ?: return null
-                val delimiterIndex = skipWhitespace(json, value.nextIndex)
-                if (delimiterIndex >= json.length || (json[delimiterIndex] != ',' && json[delimiterIndex] != '}')) {
-                    return null
-                }
-                return value.value
+                requestedValue = value.value
+                index = value.nextIndex
+            } else {
+                index = parseJsonValue(json, index) ?: return null
             }
 
-            index = skipJsonValue(json, index) ?: return null
             index = skipWhitespace(json, index)
             when {
                 index >= json.length -> return null
                 json[index] == ',' -> index += 1
-                json[index] == '}' -> return null
+                json[index] == '}' -> {
+                    val endIndex = skipWhitespace(json, index + 1)
+                    return if (endIndex == json.length) requestedValue else null
+                }
                 else -> return null
             }
         }
@@ -219,33 +225,98 @@ object InteractionSpec {
         return null
     }
 
-    private fun skipJsonValue(json: String, startIndex: Int): Int? {
-        var index = startIndex
-        var objectDepth = 0
-        var arrayDepth = 0
-        var inString = false
-        var escaped = false
-        while (index < json.length) {
-            val character = json[index]
-            if (inString) {
-                when {
-                    escaped -> escaped = false
-                    character == '\\' -> escaped = true
-                    character == '"' -> inString = false
-                }
-            } else {
-                when (character) {
-                    '"' -> inString = true
-                    '{' -> objectDepth += 1
-                    '}' -> if (objectDepth > 0) objectDepth -= 1 else if (arrayDepth == 0) return index
-                    '[' -> arrayDepth += 1
-                    ']' -> if (arrayDepth > 0) arrayDepth -= 1 else return null
-                    ',' -> if (objectDepth == 0 && arrayDepth == 0) return index
-                }
-            }
-            index += 1
+    private fun parseJsonValue(json: String, startIndex: Int): Int? {
+        val index = skipWhitespace(json, startIndex)
+        if (index >= json.length) {
+            return null
         }
-        return if (!inString && objectDepth == 0 && arrayDepth == 0) index else null
+        return when (json[index]) {
+            '"' -> parseJsonString(json, index)?.nextIndex
+            '{' -> parseJsonObject(json, index)
+            '[' -> parseJsonArray(json, index)
+            't' -> parseJsonLiteral(json, index, "true")
+            'f' -> parseJsonLiteral(json, index, "false")
+            'n' -> parseJsonLiteral(json, index, "null")
+            '-', in '0'..'9' -> parseJsonNumber(json, index)
+            else -> null
+        }
+    }
+
+    private fun parseJsonObject(json: String, startIndex: Int): Int? {
+        var index = skipWhitespace(json, startIndex + 1)
+        if (index < json.length && json[index] == '}') {
+            return index + 1
+        }
+        while (index < json.length) {
+            val key = parseJsonString(json, index) ?: return null
+            index = skipWhitespace(json, key.nextIndex)
+            if (index >= json.length || json[index] != ':') {
+                return null
+            }
+            index = parseJsonValue(json, index + 1) ?: return null
+            index = skipWhitespace(json, index)
+            when {
+                index >= json.length -> return null
+                json[index] == ',' -> index = skipWhitespace(json, index + 1)
+                json[index] == '}' -> return index + 1
+                else -> return null
+            }
+        }
+        return null
+    }
+
+    private fun parseJsonArray(json: String, startIndex: Int): Int? {
+        var index = skipWhitespace(json, startIndex + 1)
+        if (index < json.length && json[index] == ']') {
+            return index + 1
+        }
+        while (index < json.length) {
+            index = parseJsonValue(json, index) ?: return null
+            index = skipWhitespace(json, index)
+            when {
+                index >= json.length -> return null
+                json[index] == ',' -> index = skipWhitespace(json, index + 1)
+                json[index] == ']' -> return index + 1
+                else -> return null
+            }
+        }
+        return null
+    }
+
+    private fun parseJsonLiteral(json: String, startIndex: Int, literal: String): Int? {
+        val endIndex = startIndex + literal.length
+        return if (endIndex <= json.length && json.regionMatches(startIndex, literal, 0, literal.length)) {
+            endIndex
+        } else {
+            null
+        }
+    }
+
+    private fun parseJsonNumber(json: String, startIndex: Int): Int? {
+        var index = startIndex
+        if (json[index] == '-') {
+            index += 1
+            if (index >= json.length) return null
+        }
+        when {
+            json[index] == '0' -> index += 1
+            json[index] in '1'..'9' -> while (index < json.length && json[index].isDigit()) index += 1
+            else -> return null
+        }
+        if (index < json.length && json[index] == '.') {
+            index += 1
+            val fractionStart = index
+            while (index < json.length && json[index].isDigit()) index += 1
+            if (index == fractionStart) return null
+        }
+        if (index < json.length && (json[index] == 'e' || json[index] == 'E')) {
+            index += 1
+            if (index < json.length && (json[index] == '+' || json[index] == '-')) index += 1
+            val exponentStart = index
+            while (index < json.length && json[index].isDigit()) index += 1
+            if (index == exponentStart) return null
+        }
+        return index
     }
 
     private fun skipWhitespace(value: String, startIndex: Int): Int {

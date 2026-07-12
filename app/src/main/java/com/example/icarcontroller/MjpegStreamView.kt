@@ -89,10 +89,8 @@ class MjpegStreamView @JvmOverloads constructor(
             generation += 1
             stoppedGeneration = generation
             active = false
-            streamUrl = null
             previousListener = snapshotListener
-            snapshotListener = null
-            resources = detachWorkerLocked(shutdownExecutor = false)
+            resources = detachWorkerLocked(shutdownExecutor = true)
         }
         resources.cancel()
         clearBitmapOnMain()

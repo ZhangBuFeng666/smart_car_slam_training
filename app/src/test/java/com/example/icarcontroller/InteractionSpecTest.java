@@ -117,6 +117,8 @@ public class InteractionSpecTest {
         assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"message\":\"camera busy\"}"));
         assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"error\":{\"state\":\"missing\"}}"));
         assertEquals("disconnected", InteractionSpec.cameraHttp503State("not json: state=busy"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"state\":\"busy\",\"invalid\":}"));
+        assertEquals("disconnected", InteractionSpec.cameraHttp503State("{\"state\":\"busy\"} trailing"));
     }
 
     private Object requiredSpec(String methodName) {

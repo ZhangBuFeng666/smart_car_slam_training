@@ -16,6 +16,7 @@ class FakeCapture:
         self.opened = opened
         self.reads = iter(reads or [])
         self.released = False
+        self.release_calls = 0
         self.settings = []
 
     def isOpened(self):
@@ -35,6 +36,7 @@ class FakeCapture:
         return True
 
     def release(self):
+        self.release_calls += 1
         self.released = True
 
 
@@ -70,6 +72,19 @@ class UninterruptibleCapture(FakeCapture):
         self.read_started.set()
         self.allow_read_to_finish.wait()
         return False, None
+
+
+class BlockingReleaseCapture(UninterruptibleCapture):
+    def __init__(self):
+        super().__init__()
+        self.release_started = threading.Event()
+        self.allow_release_to_finish = threading.Event()
+
+    def release(self):
+        self.release_calls += 1
+        self.release_started.set()
+        self.allow_release_to_finish.wait(2.0)
+        self.released = True
 
 
 class CameraSnapshotTest(unittest.TestCase):
@@ -168,6 +183,28 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertTrue(capture.released)
         self.assertIsNone(service._capture)
 
+    def test_terminal_capture_loop_releases_backend_exactly_once(self):
+        capture = FakeCapture(opened=True, reads=[(False, None)])
+        service = self.make_service(capture_factory=lambda path: capture)
+
+        service.acquire_client()
+        self.wait_for_state(service, "busy")
+        deadline = time.monotonic() + 0.5
+        while capture.release_calls == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        self.assertEqual(1, capture.release_calls)
+
+    def test_normal_client_shutdown_releases_backend_exactly_once(self):
+        capture = HoldingCapture([FakeFrame()])
+        service = self.make_service(capture_factory=lambda path: capture)
+        service.acquire_client()
+        self.assertTrue(capture.read_blocked.wait(0.5))
+
+        service.release_client()
+
+        self.assertEqual(1, capture.release_calls)
+
     def test_first_client_starts_one_thread_and_last_client_releases_camera(self):
         capture = HoldingCapture([FakeFrame()])
         captures = [capture]
@@ -239,10 +276,10 @@ class CameraCaptureServiceTest(unittest.TestCase):
         allow_reaper = threading.Event()
         original_reap = service._reap_capture_thread
 
-        def paused_reap(thread):
+        def paused_reap(thread, capture_release):
             reaper_entered.set()
             allow_reaper.wait(0.5)
-            original_reap(thread)
+            original_reap(thread, capture_release)
 
         service._reap_capture_thread = paused_reap
         service.release_client()
@@ -253,14 +290,15 @@ class CameraCaptureServiceTest(unittest.TestCase):
         old_thread.join(0.5)
 
         service.acquire_client()
-        self.wait_for_state(service, "busy")
-        self.assertEqual(2, len(captures))
+        self.assertEqual("stopping", service.status()["state"])
+        self.assertEqual(1, len(captures))
         with service._condition:
             reaper_thread = service._reaper_thread
         allow_reaper.set()
         reaper_thread.join(0.5)
 
         self.assertFalse(reaper_thread.is_alive())
+        self.wait_for_state(service, "busy")
         self.assertEqual(2, len(captures))
 
     def test_acquire_during_last_client_shutdown_starts_a_fresh_capture(self):
@@ -571,6 +609,53 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertEqual(0, service.status()["clients"])
         capture.allow_read_to_finish.set()
         self.wait_for_state(service, "idle", timeout=1.0)
+
+    def test_shutdown_is_bounded_when_backend_release_blocks(self):
+        capture = BlockingReleaseCapture()
+        service = self.make_service(capture_factory=lambda path: capture)
+        service.acquire_client()
+        self.assertTrue(capture.read_started.wait(0.5))
+
+        started_at = time.monotonic()
+        service.shutdown()
+        elapsed = time.monotonic() - started_at
+
+        self.assertTrue(capture.release_started.is_set())
+        self.assertLess(elapsed, 1.3)
+        self.assertEqual("stopping", service.status()["state"])
+        self.assertEqual(1, capture.release_calls)
+        capture.allow_release_to_finish.set()
+        capture.allow_read_to_finish.set()
+        self.wait_for_state(service, "idle", timeout=1.0)
+        self.assertEqual(1, capture.release_calls)
+
+    def test_reconnect_waits_for_blocking_backend_release_to_finish(self):
+        first_capture = BlockingReleaseCapture()
+        captures = []
+
+        def capture_factory(path):
+            capture = first_capture if not captures else FakeCapture(
+                opened=True, reads=[(False, None)]
+            )
+            captures.append(capture)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        self.assertTrue(first_capture.read_started.wait(0.5))
+        service.release_client()
+        with service._condition:
+            old_thread = service._thread
+
+        first_capture.allow_read_to_finish.set()
+        old_thread.join(0.5)
+        service.acquire_client()
+
+        self.assertEqual(1, len(captures))
+        self.assertEqual("stopping", service.status()["state"])
+        first_capture.allow_release_to_finish.set()
+        self.wait_for_state(service, "busy", timeout=1.0)
+        self.assertEqual(2, len(captures))
 
 
 if __name__ == "__main__":

@@ -39,11 +39,37 @@ def _default_jpeg_encoder(frame, quality):
     return encoded.tobytes()
 
 
+class _CaptureRelease:
+    def __init__(self, capture):
+        self.capture = capture
+        self._lock = threading.Lock()
+        self._claimed = False
+        self._completed = threading.Event()
+
+    def release_once(self):
+        with self._lock:
+            if self._claimed:
+                return False
+            self._claimed = True
+        try:
+            self.capture.release()
+        except Exception:
+            pass
+        finally:
+            self._completed.set()
+        return True
+
+    def wait(self, timeout=None):
+        return self._completed.wait(timeout)
+
+
 class CameraCaptureService:
     _READY_STATES = frozenset(("live", "missing", "busy", "disconnected"))
     _CAP_PROP_FRAME_WIDTH = 3
     _CAP_PROP_FRAME_HEIGHT = 4
     _CAP_PROP_FPS = 5
+    _RELEASE_WAIT_SECONDS = 0.05
+    _CAPTURE_JOIN_SECONDS = 1.0
 
     def __init__(
         self,
@@ -81,6 +107,7 @@ class CameraCaptureService:
         self._last_captured_at = None
         self._capture = None
         self._capture_generation = None
+        self._capture_release = None
         self._thread = None
         self._reaper_thread = None
         self._stop_requested = False
@@ -95,7 +122,13 @@ class CameraCaptureService:
                 previous_clients = self._clients
                 self._clients += 1
                 if previous_clients == 0:
-                    if self._thread is not None and self._thread.is_alive():
+                    capture_stopping = (
+                        self._thread is not None and self._thread.is_alive()
+                    ) or (
+                        self._reaper_thread is not None
+                        and self._reaper_thread.is_alive()
+                    )
+                    if capture_stopping:
                         self._state = "stopping"
                     else:
                         self._thread = None
@@ -207,18 +240,21 @@ class CameraCaptureService:
             self._stop_requested = True
             thread = self._thread
             capture = self._capture
+            capture_release = self._capture_release
             self._clear_frame_visibility_locked()
             self._condition.notify_all()
 
-        self._release_capture(capture)
+        release_complete = self._request_capture_release(capture_release)
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
+            thread.join(timeout=self._CAPTURE_JOIN_SECONDS)
 
         with self._condition:
-            if thread is not None and thread.is_alive():
+            if (
+                thread is not None and thread.is_alive()
+            ) or not release_complete:
                 self._state = "stopping"
                 self._error = "camera capture thread is still stopping"
-                self._start_reaper_locked(thread)
+                self._start_reaper_locked(thread, capture_release)
                 self._condition.notify_all()
                 return False
             if self._thread is thread:
@@ -226,18 +262,22 @@ class CameraCaptureService:
             if self._capture is capture:
                 self._capture = None
                 self._capture_generation = None
+                self._capture_release = None
             self._set_idle_locked()
             self._condition.notify_all()
             return True
 
     def _capture_loop(self, generation):
         capture = None
+        capture_release = None
         try:
             capture, device = self._open_capture(generation)
             if capture is None:
                 return
-            if not self._set_active_capture(generation, capture, device):
-                self._release_capture(capture)
+            capture_release = _CaptureRelease(capture)
+            if not self._set_active_capture(
+                generation, capture, capture_release, device
+            ):
                 return
 
             self._configure_capture(capture)
@@ -279,7 +319,8 @@ class CameraCaptureService:
         except Exception as error:
             self._set_state(generation, "disconnected", str(error))
         finally:
-            self._release_capture(capture)
+            if capture_release is not None:
+                capture_release.release_once()
             with self._condition:
                 if (
                     self._capture is capture
@@ -287,6 +328,7 @@ class CameraCaptureService:
                 ):
                     self._capture = None
                     self._capture_generation = None
+                    self._capture_release = None
                 self._condition.notify_all()
 
     def _open_capture(self, generation):
@@ -329,12 +371,13 @@ class CameraCaptureService:
         candidates = sorted(set(self.device_candidates()))
         return configured + [device for device in candidates if device not in configured]
 
-    def _set_active_capture(self, generation, capture, device):
+    def _set_active_capture(self, generation, capture, capture_release, device):
         with self._condition:
             if self._generation != generation or self._stop_requested:
                 return False
             self._capture = capture
             self._capture_generation = generation
+            self._capture_release = capture_release
             self._device = str(device)
             return True
 
@@ -372,20 +415,23 @@ class CameraCaptureService:
             return int(shape[1]), int(shape[0])
         return self.width, self.height
 
-    def _start_reaper_locked(self, thread):
+    def _start_reaper_locked(self, thread, capture_release):
         if self._reaper_thread is not None and self._reaper_thread.is_alive():
             return
         reaper = threading.Thread(
             target=self._reap_capture_thread,
-            args=(thread,),
+            args=(thread, capture_release),
             name="camera-capture-reaper",
             daemon=True,
         )
         self._reaper_thread = reaper
         reaper.start()
 
-    def _reap_capture_thread(self, capture_thread):
-        capture_thread.join()
+    def _reap_capture_thread(self, capture_thread, capture_release):
+        if capture_thread is not None:
+            capture_thread.join()
+        if capture_release is not None:
+            capture_release.wait()
         with self._lifecycle_lock:
             with self._condition:
                 if self._reaper_thread is threading.current_thread():
@@ -430,6 +476,23 @@ class CameraCaptureService:
         if state == "busy":
             return f"{message}; close other camera applications and check permissions"
         return message
+
+    def _request_capture_release(self, capture_release):
+        if capture_release is None:
+            return True
+        if capture_release.wait(0):
+            return True
+
+        def release_capture():
+            capture_release.release_once()
+
+        release_thread = threading.Thread(
+            target=release_capture,
+            name="camera-release",
+            daemon=True,
+        )
+        release_thread.start()
+        return capture_release.wait(self._RELEASE_WAIT_SECONDS)
 
     def _should_stop(self, generation):
         with self._condition:

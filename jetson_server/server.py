@@ -2,14 +2,21 @@
 import argparse
 import json
 import math
+import os
+import queue
+import shlex
 import signal
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 
+ROS_DOMAIN_ID = 32
 ROS_SETUP = (
+    f"export ROS_DOMAIN_ID={ROS_DOMAIN_ID}; "
     "source /opt/ros/foxy/setup.bash; "
     "[ -f /root/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash ] && "
     "source /root/yahboomcar_ros2_ws/yahboomcar_ws/install/setup.bash; "
@@ -21,8 +28,11 @@ TASK_COMMANDS = {
     "base": "ros2 run icar_bringup Mcnamu_driver_X3",
     "lidar": "ros2 launch sllidar_ros2 sllidar_launch.py",
     "avoidance": "ros2 run icar_laser laser_Avoidance_a1_X3",
+    "follow": "ros2 run icar_laser laser_Tracker_a1_X3",
+    "warning": "ros2 run icar_laser laser_Warning_a1_X3",
     "camera": "ros2 launch astra_camera astra.launch.xml",
     "hsv": "ros2 run icar_astra colorHSV",
+    "color_track": "ros2 run icar_astra colorTracker",
     "map_gmapping": "ros2 launch yahboomcar_nav map_gmapping_launch.py",
     "map_display": "ros2 launch yahboomcar_nav display_map_launch.py",
     "map_save": "ros2 launch yahboomcar_nav save_map_launch.py",
@@ -31,13 +41,190 @@ TASK_COMMANDS = {
     "nav_dwa": "ros2 launch yahboomcar_nav navigation_dwa_launch.py",
     "nav_teb": "ros2 launch yahboomcar_nav navigation_teb_launch.py",
 }
+TASK_PATTERNS = {
+    "base": "Mcnamu_driver_X3",
+    "lidar": "sllidar_launch.py",
+    "avoidance": "laser_Avoidance_a1_X3",
+    "follow": "laser_Tracker_a1_X3",
+    "warning": "laser_Warning_a1_X3",
+    "camera": "astra_camera",
+    "hsv": "colorHSV",
+    "color_track": "colorTracker",
+    "map_gmapping": "map_gmapping_launch.py",
+    "map_display": "display_map_launch.py",
+    "map_save": "save_map_launch.py",
+    "nav_laser": "laser_bringup_launch.py",
+    "nav_display": "display_nav_launch.py",
+    "nav_dwa": "navigation_dwa_launch.py",
+    "nav_teb": "navigation_teb_launch.py",
+}
 
 ONE_SHOT_TASKS = {"map_save"}
 RUNNING = {}
+LOG_HANDLES = {}
 SERVER_CONFIG = {
     "container": "8b98",
     "dry_run": False,
 }
+MOTION_BRIDGE = None
+
+
+class MotionBridgeClient:
+    REMOTE_SCRIPT = "/tmp/icar_motion_bridge.py"
+
+    def __init__(
+        self,
+        container,
+        script_path,
+        process_factory=subprocess.Popen,
+        copy_runner=subprocess.run,
+        response_timeout=5.0,
+        watchdog_ms=350,
+        clock=time.perf_counter,
+    ):
+        self.container = container
+        self.script_path = Path(script_path)
+        self.process_factory = process_factory
+        self.copy_runner = copy_runner
+        self.response_timeout = float(response_timeout)
+        self.watchdog_ms = int(watchdog_ms)
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.process = None
+        self.responses = queue.Queue()
+        self.reader_thread = None
+        self.sequence = 0
+
+    def is_running(self):
+        return self.process is not None and self.process.poll() is None
+
+    def start(self):
+        with self.lock:
+            self._ensure_started()
+
+    def send(self, direction, speed, turn):
+        with self.lock:
+            last_error = None
+            for _attempt in range(2):
+                try:
+                    return self._send_once(direction, speed, turn)
+                except Exception as error:
+                    last_error = error
+                    self._terminate_process()
+            raise RuntimeError(f"motion bridge unavailable: {last_error}")
+
+    def shutdown(self, send_stop=True):
+        with self.lock:
+            if send_stop and self.is_running():
+                try:
+                    self._send_once("stop", 0.0, 0.0)
+                except Exception:
+                    pass
+            self._terminate_process()
+
+    def _ensure_started(self):
+        if self.is_running():
+            return
+        if not self.script_path.is_file():
+            raise FileNotFoundError(f"motion bridge script not found: {self.script_path}")
+
+        self.copy_runner(
+            ["docker", "cp", str(self.script_path), f"{self.container}:{self.REMOTE_SCRIPT}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        command = [
+            "docker",
+            "exec",
+            "-i",
+            self.container,
+            "bash",
+            "-lc",
+            f"{ROS_SETUP}; exec python3 -u {self.REMOTE_SCRIPT} --watchdog-ms {self.watchdog_ms}",
+        ]
+        self.responses = queue.Queue()
+        self.process = self.process_factory(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        response_queue = self.responses
+        process = self.process
+        self.reader_thread = threading.Thread(
+            target=self._read_responses,
+            args=(process, response_queue),
+            name="motion-bridge-reader",
+            daemon=True,
+        )
+        self.reader_thread.start()
+
+    @staticmethod
+    def _read_responses(process, response_queue):
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            response_queue.put(line)
+
+    def _send_once(self, direction, speed, turn):
+        self._ensure_started()
+        self.sequence += 1
+        sequence = self.sequence
+        command = {
+            "sequence": sequence,
+            "direction": direction,
+            "speed": float(speed),
+            "turn": float(turn),
+        }
+        started_at = self.clock()
+        self.process.stdin.write(json.dumps(command, separators=(",", ":")) + "\n")
+        self.process.stdin.flush()
+        raw_response = self.responses.get(timeout=self.response_timeout)
+        response = json.loads(raw_response)
+        if response.get("sequence") != sequence:
+            raise RuntimeError(
+                f"motion bridge sequence mismatch: expected {sequence}, got {response.get('sequence')}"
+            )
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "motion bridge rejected command"))
+        response["round_trip_ms"] = round((self.clock() - started_at) * 1000.0, 3)
+        return response
+
+    def _terminate_process(self):
+        process = self.process
+        self.process = None
+        if process is None:
+            return
+        try:
+            if process.stdin:
+                process.stdin.close()
+        except Exception:
+            pass
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
+def create_motion_bridge(container):
+    return MotionBridgeClient(
+        container=container,
+        script_path=Path(__file__).with_name("motion_bridge.py"),
+    )
+
+
+def clamp_float(value, default, min_value, max_value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, min(max_value, parsed))
 
 
 def build_initial_pose_command(x, y, yaw):
@@ -121,10 +308,9 @@ def docker_command(ros_command):
     ]
 
 
-def run_once(ros_command, timeout=8):
-    command = docker_command(ros_command)
+def run_host(command, timeout=8):
     if SERVER_CONFIG["dry_run"]:
-        return {"dry_run": True, "command": command}
+        return {"dry_run": True, "command": command, "returncode": 0, "stdout": "", "stderr": ""}
     completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     return {
         "returncode": completed.returncode,
@@ -133,40 +319,114 @@ def run_once(ros_command, timeout=8):
     }
 
 
+def run_once(ros_command, timeout=8):
+    command = docker_command(ros_command)
+    return run_host(command, timeout=timeout)
+
+
+def container_is_running():
+    result = run_host(
+        ["docker", "inspect", "-f", "{{.State.Running}}", SERVER_CONFIG["container"]],
+        timeout=3,
+    )
+    return result["returncode"] == 0 and result["stdout"].strip().lower() == "true"
+
+
+def safe_process_pattern(pattern):
+    return f"[{pattern[0]}]{pattern[1:]}" if pattern else pattern
+
+
+def task_processes(task):
+    if task not in TASK_PATTERNS:
+        return ""
+    pattern = safe_process_pattern(TASK_PATTERNS[task])
+    result = run_once(f"pgrep -af {shlex.quote(pattern)} || true", timeout=3)
+    return result.get("stdout", "").strip()
+
+
+def close_task_log(task):
+    handle = LOG_HANDLES.pop(task, None)
+    if handle is not None:
+        handle.close()
+
+
 def start_task(task):
     if task not in TASK_COMMANDS:
         return 404, {"error": f"unknown task: {task}"}
-    if task in RUNNING and RUNNING[task].poll() is None:
-        return 200, {"task": task, "status": "already_running"}
     if task in ONE_SHOT_TASKS:
         return 200, {"task": task, "status": "finished", "result": run_once(TASK_COMMANDS[task], timeout=30)}
 
     command = docker_command(TASK_COMMANDS[task])
     if SERVER_CONFIG["dry_run"]:
         return 200, {"task": task, "status": "dry_run", "command": command}
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    existing = task_processes(task)
+    if existing:
+        return 200, {"task": task, "status": "already_running", "process": existing}
+
+    log_directory = Path(__file__).with_name("logs")
+    log_directory.mkdir(parents=True, exist_ok=True)
+    log_path = log_directory / f"{task}.log"
+    close_task_log(task)
+    log_handle = open(log_path, "ab", buffering=0)
+    process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT)
     RUNNING[task] = process
-    return 200, {"task": task, "status": "started", "pid": process.pid}
+    LOG_HANDLES[task] = log_handle
+    time.sleep(0.8)
+    discovered = task_processes(task)
+    status = "started" if discovered else "start_failed"
+    return 200, {
+        "task": task,
+        "status": status,
+        "ok": bool(discovered),
+        "pid": process.pid,
+        "process": discovered,
+        "log": os.path.relpath(log_path, Path(__file__).parent),
+    }
 
 
 def stop_task(task):
     if task == "all":
         stopped = []
-        for key in list(RUNNING.keys()):
+        for key in reversed(TASK_COMMANDS):
             _, body = stop_task(key)
             stopped.append(body)
         return 200, {"stopped": stopped}
-    process = RUNNING.get(task)
-    if process is None or process.poll() is not None:
+    if task not in TASK_COMMANDS:
+        return 404, {"error": f"unknown task: {task}"}
+
+    if SERVER_CONFIG["dry_run"]:
         RUNNING.pop(task, None)
-        return 200, {"task": task, "status": "not_running"}
-    process.send_signal(signal.SIGTERM)
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        close_task_log(task)
+        return 200, {"task": task, "status": "dry_run"}
+
+    pattern = safe_process_pattern(TASK_PATTERNS[task])
+    result = run_once(f"pkill -f {shlex.quote(pattern)} || true", timeout=3)
+    process = RUNNING.get(task)
+    if process is not None and process.poll() is None:
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
     RUNNING.pop(task, None)
-    return 200, {"task": task, "status": "stopped"}
+    close_task_log(task)
+    return 200, {"task": task, "status": "stopped", "output": result.get("stdout", "")}
+
+
+def stop_motion_safely():
+    try:
+        result = MOTION_BRIDGE.send("stop", 0.0, 0.0)
+        result["mode"] = "bridge"
+        return result
+    except Exception as error:
+        fallback = run_once(build_twist_command("stop", 0.0, 0.0), timeout=3)
+        return {
+            "ok": fallback.get("returncode") == 0,
+            "mode": "fallback",
+            "bridge_error": str(error),
+            "fallback": fallback,
+        }
 
 
 def query_float(query, name, default=0.0):
@@ -193,29 +453,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def route(self, path, query):
         if path == "health":
-            return 200, {"ok": True, "container": SERVER_CONFIG["container"]}
-        if path == "status":
             return 200, {
-                "running": {
-                    task: process.poll() is None
-                    for task, process in RUNNING.items()
-                },
-                "tasks": sorted(TASK_COMMANDS.keys()),
+                "ok": True,
+                "container": SERVER_CONFIG["container"],
+                "container_running": container_is_running(),
+                "motion_bridge_ready": bool(MOTION_BRIDGE and MOTION_BRIDGE.is_running()),
             }
+        if path == "status":
+            states = {}
+            for task in TASK_COMMANDS:
+                process = task_processes(task)
+                states[task] = {"running": bool(process), "process": process}
+            return 200, states
         if path == "stop/all":
-            return stop_task("all")
+            motion_result = stop_motion_safely()
+            status, body = stop_task("all")
+            body["motion"] = motion_result
+            return status, body
         if path.startswith("start/"):
             return start_task(unquote(path.split("/", 1)[1]))
         if path.startswith("stop/"):
             return stop_task(unquote(path.split("/", 1)[1]))
         if path == "emergency_stop":
+            result = stop_motion_safely()
             stop_task("all")
-            return 200, {"status": "emergency_stop", "result": run_once(build_twist_command("stop", 0.0, 0.0))}
+            return 200, {"status": "emergency_stop", "result": result}
         if path.startswith("move/"):
             direction = unquote(path.split("/", 1)[1])
-            speed = query_float(query, "speed", 0.12)
-            turn = query_float(query, "turn", 0.8)
-            return 200, {"direction": direction, "result": run_once(build_twist_command(direction, speed, turn), timeout=3)}
+            speed_raw = query.get("speed", ["0.18"])[0]
+            turn_raw = query.get("turn", ["0.8"])[0]
+            speed = clamp_float(speed_raw, 0.18, 0.05, 0.35)
+            turn = clamp_float(turn_raw, 0.8, 0.2, 1.2)
+            return 200, MOTION_BRIDGE.send(direction, speed, turn)
         if path == "navigation/initial_pose":
             x = query_float(query, "x")
             y = query_float(query, "y")
@@ -239,6 +508,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global MOTION_BRIDGE
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default="8b98")
     parser.add_argument("--host", default="0.0.0.0")
@@ -247,10 +517,27 @@ def main():
     args = parser.parse_args()
     SERVER_CONFIG["container"] = args.container
     SERVER_CONFIG["dry_run"] = args.dry_run
+    MOTION_BRIDGE = create_motion_bridge(args.container)
+
+    if not args.dry_run:
+        try:
+            warmup = MOTION_BRIDGE.send("stop", 0.0, 0.0)
+            print(
+                "Motion bridge ready, "
+                f"round_trip_ms={warmup.get('round_trip_ms')}, "
+                f"bridge_latency_ms={warmup.get('bridge_latency_ms')}"
+            )
+        except Exception as error:
+            print(f"Motion bridge warm-up failed: {error}")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Smart car HTTP server on {args.host}:{args.port}, container={args.container}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        if MOTION_BRIDGE is not None:
+            MOTION_BRIDGE.shutdown()
 
 
 if __name__ == "__main__":

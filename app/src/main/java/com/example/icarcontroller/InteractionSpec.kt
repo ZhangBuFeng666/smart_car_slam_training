@@ -56,7 +56,7 @@ object InteractionSpec {
     fun statusPulseMillis(): Int = 320
 
     @JvmStatic
-    fun remoteRepeatMillis(): Int = 190
+    fun remoteRepeatMillis(): Int = 120
 
     @JvmStatic
     fun parkingDriveControlSizeDp(): Int = 78

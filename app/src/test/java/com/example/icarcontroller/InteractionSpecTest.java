@@ -32,7 +32,9 @@ public class InteractionSpecTest {
     public void matureInteractionsUseLayeredMotion() {
         assertTrue((Float) requiredSpec("navSelectionScale") > 1.0f);
         assertTrue((Integer) requiredSpec("statusPulseMillis") >= 260);
-        assertTrue((Integer) requiredSpec("remoteRepeatMillis") <= 220);
+        int repeatMillis = (Integer) requiredSpec("remoteRepeatMillis");
+        assertTrue(repeatMillis >= 80);
+        assertTrue(repeatMillis <= 150);
     }
 
     @Test

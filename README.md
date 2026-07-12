@@ -85,3 +85,12 @@ APP 的“导航”页按第 3 章手册接入以下流程：
 4. 路径规划：APP 发布初始位姿和目标点，Nav2 的 `planner_server` 生成路径，`controller_server` 控制小车跟随路径。
 
 手册里强调：RViz 地图显示节点要先于导航节点启动，否则可能订阅不到只发布一次的 `/map`。
+
+## Low-latency manual control
+
+Jetson deployment now requires both `jetson_server/server.py` and
+`jetson_server/motion_bridge.py`. The HTTP service keeps one ROS 2 publisher
+alive inside the selected container, so Android movement requests no longer
+start a new Docker and ROS process for every touch event. The bridge includes
+a 350 ms automatic-stop watchdog, while the Android hold control refreshes at
+120 ms.

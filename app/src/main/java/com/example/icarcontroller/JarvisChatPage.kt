@@ -30,14 +30,7 @@ class JarvisChatPage(
     private var token = credentials.loadToken()
     private var missionId: String? = null
     private var currentPlan: JarvisMissionPlan? = null
-    private var state = JarvisViewState.initial().copy(
-        chatItems = listOf(
-            JarvisChatItem.AssistantMessage(
-                "贾维斯已就绪。请输入巡检目标。",
-                ""
-            )
-        )
-    )
+    private var state = JarvisViewState.initial()
 
     private val chatList = LinearLayout(context).apply {
         orientation = VERTICAL
@@ -66,10 +59,8 @@ class JarvisChatPage(
     init {
         orientation = VERTICAL
         setPadding(0, 0, 0, 0)
-        addView(statusBar(), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, 0, 0, dp(6))
-        })
         addView(ScrollView(context).apply {
+            isFillViewport = true
             addView(chatList)
         }, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(composer(), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
@@ -78,41 +69,20 @@ class JarvisChatPage(
         render()
     }
 
-    private fun statusBar(): LinearLayout = LinearLayout(context).apply {
+    private fun composer(): LinearLayout = LinearLayout(context).apply {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(4), dp(2), dp(4), dp(2))
-        addView(TextView(context).apply {
-            text = "Jarvis"
-            setTextColor(color(palette.textPrimary))
-            textSize = 13f
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-        })
-        addView(TextView(context).apply {
-            text = " · $host:8100 · ${if (token.isBlank()) "Token 未配置" else "Token 已配置"}"
-            setTextColor(color(palette.textSecondary))
-            textSize = 11f
-            maxLines = 1
-        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-        addView(iconButton("⚙") {
-            tokenInput.visibility = if (tokenInput.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }, LayoutParams(dp(34), dp(34)))
-    }
-
-    private fun composer(): LinearLayout = LinearLayout(context).apply {
-        orientation = VERTICAL
         setPadding(0, dp(4), 0, 0)
-        tokenInput.visibility = View.GONE
-        addView(tokenInput, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, 0, 0, dp(8))
+        addView(input, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        addView(iconButton("!") {
+            onEmergencyStop()
+            state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded("已发送急停指令。"))
+            render()
+        }, LayoutParams(dp(38), dp(38)).apply {
+            setMargins(dp(6), 0, 0, 0)
         })
-        addView(LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(input, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-            addView(primaryButton("发送") { sendMessage() }, LayoutParams(dp(58), dp(38)).apply {
-                setMargins(dp(6), 0, 0, 0)
-            })
+        addView(primaryButton("发送") { sendMessage() }, LayoutParams(dp(58), dp(38)).apply {
+            setMargins(dp(6), 0, 0, 0)
         })
     }
 

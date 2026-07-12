@@ -130,6 +130,15 @@ class MainActivity : Activity() {
         scrollContent.isVerticalScrollBarEnabled = false
         topBar = findViewById(R.id.topBar)
         bottomNav = findViewById(R.id.bottomNav)
+        findViewById<View>(android.R.id.content).setOnApplyWindowInsetsListener { _, insets ->
+            val keyboardVisible = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                insets.isVisible(WindowInsets.Type.ime())
+            } else {
+                false
+            }
+            bottomNav.visibility = if (selectedPage == "ai" && keyboardVisible) View.GONE else View.VISIBLE
+            insets
+        }
         txtAppTitle = findViewById(R.id.txtAppTitle)
         txtStatusPill = findViewById(R.id.txtStatusPill)
         globalThemeToggle = findViewById(R.id.globalThemeToggle)
@@ -214,6 +223,15 @@ class MainActivity : Activity() {
         portInput = null
 
         pageContent.removeAllViews()
+        pageContent.layoutParams = pageContent.layoutParams.apply {
+            height = if (key == "ai") ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        pageContent.setPadding(
+            pageContent.paddingLeft,
+            pageContent.paddingTop,
+            pageContent.paddingRight,
+            if (key == "ai") 0 else dp(InteractionSpec.contentBottomClearanceDp())
+        )
         updateChrome(key)
         updateTopBar(key)
         updateNavigation()
@@ -417,12 +435,6 @@ class MainActivity : Activity() {
     }
 
     private fun renderAiPage() {
-        pageContent.addView(parkingPageHeader(
-            kicker = JarvisUiSpec.headerKicker(),
-            title = JarvisUiSpec.headerTitle(),
-            subtitle = JarvisUiSpec.headerSubtitle(),
-            status = "连接 8100"
-        ))
         pageContent.addView(JarvisChatPage(
             context = this,
             host = currentHost,
@@ -432,8 +444,11 @@ class MainActivity : Activity() {
             onEmergencyStop = {
                 sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)
             }
+        ), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            0,
+            1f
         ))
-        pageContent.addView(parkingSafetyStrip())
     }
 
     private fun renderVision() {

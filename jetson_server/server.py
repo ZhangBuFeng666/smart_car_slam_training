@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import json
 import math
 import os
 import queue
 import shlex
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -73,6 +75,13 @@ SERVER_CONFIG = {
 }
 MOTION_BRIDGE = None
 CAMERA_STREAM = None
+STREAM_WRITE_TIMEOUT = 2.0
+STREAM_DISCONNECT_ERRNOS = {
+    errno.ECONNABORTED,
+    errno.ECONNRESET,
+    errno.EPIPE,
+    errno.ETIMEDOUT,
+}
 
 
 class MotionBridgeClient:
@@ -233,6 +242,35 @@ def create_camera_stream(device, width, height, fps, quality):
         fps=fps,
         jpeg_quality=quality,
     )
+
+
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def jpeg_quality(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 100")
+    if not 1 <= parsed <= 100:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 100")
+    return parsed
+
+
+def is_stream_disconnect(error):
+    if isinstance(
+        error,
+        (socket.timeout, TimeoutError, BrokenPipeError, ConnectionResetError, ConnectionAbortedError),
+    ):
+        return True
+    return isinstance(error, OSError) and error.errno in STREAM_DISCONNECT_ERRNOS
 
 
 def build_mjpeg_chunk(jpeg):
@@ -482,31 +520,45 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(status, body)
 
     def stream_camera(self):
-        if CAMERA_STREAM is None:
+        camera_stream = CAMERA_STREAM
+        if camera_stream is None:
             self.reply(503, {"state": "unavailable", "error": "camera service unavailable"})
             return
 
-        CAMERA_STREAM.acquire_client()
+        camera_stream.acquire_client()
+        connection = getattr(self, "connection", None)
+        previous_timeout = None
+        timeout_changed = False
         try:
-            if not CAMERA_STREAM.wait_until_ready(timeout=2.0):
-                snapshot = CAMERA_STREAM.status()
+            if not camera_stream.wait_until_ready(timeout=2.0):
+                snapshot = camera_stream.status()
                 state = snapshot.get("state", "unavailable")
                 error = snapshot.get("error") or f"camera {state}"
                 self.reply(503, {"state": state, "error": error})
                 return
 
-            self.send_response(200)
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
+            if connection is not None:
+                previous_timeout = connection.gettimeout()
+                connection.settimeout(STREAM_WRITE_TIMEOUT)
+                timeout_changed = True
+
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except OSError as error:
+                if is_stream_disconnect(error):
+                    return
+                raise
 
             sequence = 0
             while True:
-                next_sequence, jpeg = CAMERA_STREAM.wait_for_frame(sequence, timeout=1.0)
+                next_sequence, jpeg = camera_stream.wait_for_frame(sequence, timeout=1.0)
                 if jpeg is None:
-                    if CAMERA_STREAM.status().get("state") in {
+                    if camera_stream.status().get("state") in {
                         "busy",
                         "disconnected",
                         "idle",
@@ -517,17 +569,29 @@ class Handler(BaseHTTPRequestHandler):
                 if next_sequence <= sequence:
                     continue
                 sequence = next_sequence
-                self.wfile.write(build_mjpeg_chunk(jpeg))
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+                try:
+                    self.wfile.write(build_mjpeg_chunk(jpeg))
+                    self.wfile.flush()
+                except OSError as error:
+                    if is_stream_disconnect(error):
+                        break
+                    raise
         finally:
-            CAMERA_STREAM.release_client()
+            if timeout_changed:
+                try:
+                    connection.settimeout(previous_timeout)
+                except OSError:
+                    pass
+            camera_stream.release_client()
 
     def route(self, path, query):
         if path == "camera/status":
+            if CAMERA_STREAM is None:
+                return 503, {"state": "unavailable", "error": "camera service unavailable"}
             return 200, CAMERA_STREAM.status()
         if path == "camera/restart":
+            if CAMERA_STREAM is None:
+                return 503, {"state": "unavailable", "error": "camera service unavailable"}
             return 200, CAMERA_STREAM.restart()
         if path == "health":
             return 200, {
@@ -592,10 +656,10 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--camera-device", default=None)
-    parser.add_argument("--camera-width", type=int, default=640)
-    parser.add_argument("--camera-height", type=int, default=480)
-    parser.add_argument("--camera-fps", type=int, default=18)
-    parser.add_argument("--camera-quality", type=int, default=70)
+    parser.add_argument("--camera-width", type=positive_int, default=640)
+    parser.add_argument("--camera-height", type=positive_int, default=480)
+    parser.add_argument("--camera-fps", type=positive_int, default=18)
+    parser.add_argument("--camera-quality", type=jpeg_quality, default=70)
     args = parser.parse_args()
     SERVER_CONFIG["container"] = args.container
     SERVER_CONFIG["dry_run"] = args.dry_run
@@ -624,9 +688,15 @@ def main():
     try:
         server.serve_forever()
     finally:
-        server.server_close()
-        if MOTION_BRIDGE is not None:
-            MOTION_BRIDGE.shutdown()
+        try:
+            if CAMERA_STREAM is not None:
+                CAMERA_STREAM.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                if MOTION_BRIDGE is not None:
+                    MOTION_BRIDGE.shutdown()
 
 
 if __name__ == "__main__":

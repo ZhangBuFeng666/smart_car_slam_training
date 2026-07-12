@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass
 import glob
 import threading
 import time
-from typing import Callable, Iterable, Optional
+from typing import Iterable, Optional
 
 
 @dataclass(frozen=True)
@@ -58,8 +58,10 @@ class CameraCaptureService:
         clock=time.monotonic,
     ):
         self.configured_device = configured_device
-        self.width = int(width)
-        self.height = int(height)
+        self.requested_width = int(width)
+        self.requested_height = int(height)
+        self.width = self.requested_width
+        self.height = self.requested_height
         self.target_fps = int(fps)
         self.jpeg_quality = int(jpeg_quality)
         self.device_candidates = device_candidates
@@ -78,17 +80,26 @@ class CameraCaptureService:
         self._error = None
         self._last_captured_at = None
         self._capture = None
+        self._capture_generation = None
         self._thread = None
+        self._reaper_thread = None
         self._stop_requested = False
+        self._closed = False
         self._generation = 0
 
     def acquire_client(self):
         with self._lifecycle_lock:
             with self._condition:
+                if self._closed:
+                    return self._status_locked()
                 previous_clients = self._clients
                 self._clients += 1
                 if previous_clients == 0:
-                    self._start_capture_locked()
+                    if self._thread is not None and self._thread.is_alive():
+                        self._state = "stopping"
+                    else:
+                        self._thread = None
+                        self._start_capture_locked()
                 return self._status_locked()
 
     def release_client(self):
@@ -106,11 +117,21 @@ class CameraCaptureService:
     def restart(self):
         with self._lifecycle_lock:
             with self._condition:
+                if self._closed:
+                    return self._status_locked()
                 has_clients = self._clients > 0
-            self._shutdown_capture()
-            if has_clients:
+            stopped = self._shutdown_capture()
+            if has_clients and stopped:
                 with self._condition:
                     self._start_capture_locked()
+            return self.status()
+
+    def shutdown(self):
+        with self._lifecycle_lock:
+            with self._condition:
+                self._closed = True
+                self._clients = 0
+            self._shutdown_capture()
             return self.status()
 
     def status(self):
@@ -130,7 +151,7 @@ class CameraCaptureService:
     def wait_for_frame(self, after_sequence, timeout):
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._condition:
-            while self._sequence <= after_sequence:
+            while self._latest_frame is None or self._sequence <= after_sequence:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return after_sequence, None
@@ -144,6 +165,8 @@ class CameraCaptureService:
         self, frame, width, height, captured_at, generation=None
     ):
         with self._condition:
+            if self._closed:
+                return None
             if generation is not None and (
                 self._generation != generation or self._stop_requested
             ):
@@ -167,8 +190,7 @@ class CameraCaptureService:
         self._state = "connecting"
         self._device = None
         self._error = None
-        self._measured_fps = 0.0
-        self._last_captured_at = None
+        self._clear_frame_visibility_locked()
         thread = threading.Thread(
             target=self._capture_loop,
             args=(generation,),
@@ -185,8 +207,7 @@ class CameraCaptureService:
             self._stop_requested = True
             thread = self._thread
             capture = self._capture
-            self._thread = None
-            self._capture = None
+            self._clear_frame_visibility_locked()
             self._condition.notify_all()
 
         self._release_capture(capture)
@@ -194,12 +215,20 @@ class CameraCaptureService:
             thread.join(timeout=1.0)
 
         with self._condition:
-            self._state = "idle"
-            self._device = None
-            self._error = None
-            self._measured_fps = 0.0
-            self._last_captured_at = None
+            if thread is not None and thread.is_alive():
+                self._state = "stopping"
+                self._error = "camera capture thread is still stopping"
+                self._start_reaper_locked(thread)
+                self._condition.notify_all()
+                return False
+            if self._thread is thread:
+                self._thread = None
+            if self._capture is capture:
+                self._capture = None
+                self._capture_generation = None
+            self._set_idle_locked()
             self._condition.notify_all()
+            return True
 
     def _capture_loop(self, generation):
         capture = None
@@ -217,7 +246,10 @@ class CameraCaptureService:
                 self._set_state(
                     generation,
                     "busy",
-                    f"camera {device} opened but did not return a frame",
+                    (
+                        f"camera {device} opened but did not return a frame; "
+                        "close other camera applications and check permissions"
+                    ),
                 )
                 return
 
@@ -246,6 +278,16 @@ class CameraCaptureService:
                         self._condition.wait(0.01)
         except Exception as error:
             self._set_state(generation, "disconnected", str(error))
+        finally:
+            self._release_capture(capture)
+            with self._condition:
+                if (
+                    self._capture is capture
+                    and self._capture_generation == generation
+                ):
+                    self._capture = None
+                    self._capture_generation = None
+                self._condition.notify_all()
 
     def _open_capture(self, generation):
         for device in self._ordered_devices():
@@ -253,13 +295,30 @@ class CameraCaptureService:
                 return None, None
             try:
                 capture = self.capture_factory(device)
-            except Exception:
-                continue
+            except Exception as error:
+                state = self._classify_open_error(error)
+                if state == "missing":
+                    continue
+                self._set_state(
+                    generation,
+                    state,
+                    self._open_error_message(device, error, state),
+                )
+                return None, None
             try:
                 if capture is not None and capture.isOpened():
                     return capture, device
-            except Exception:
-                pass
+            except Exception as error:
+                self._release_capture(capture)
+                state = self._classify_open_error(error)
+                if state == "missing":
+                    continue
+                self._set_state(
+                    generation,
+                    state,
+                    self._open_error_message(device, error, state),
+                )
+                return None, None
             self._release_capture(capture)
 
         self._set_state(generation, "missing", "no camera device could be opened")
@@ -275,6 +334,7 @@ class CameraCaptureService:
             if self._generation != generation or self._stop_requested:
                 return False
             self._capture = capture
+            self._capture_generation = generation
             self._device = str(device)
             return True
 
@@ -283,8 +343,8 @@ class CameraCaptureService:
         if setter is None:
             return
         for property_id, value in (
-            (self._CAP_PROP_FRAME_WIDTH, self.width),
-            (self._CAP_PROP_FRAME_HEIGHT, self.height),
+            (self._CAP_PROP_FRAME_WIDTH, self.requested_width),
+            (self._CAP_PROP_FRAME_HEIGHT, self.requested_height),
             (self._CAP_PROP_FPS, self.target_fps),
         ):
             try:
@@ -311,6 +371,65 @@ class CameraCaptureService:
         if shape is not None and len(shape) >= 2:
             return int(shape[1]), int(shape[0])
         return self.width, self.height
+
+    def _start_reaper_locked(self, thread):
+        if self._reaper_thread is not None and self._reaper_thread.is_alive():
+            return
+        reaper = threading.Thread(
+            target=self._reap_capture_thread,
+            args=(thread,),
+            name="camera-capture-reaper",
+            daemon=True,
+        )
+        self._reaper_thread = reaper
+        reaper.start()
+
+    def _reap_capture_thread(self, capture_thread):
+        capture_thread.join()
+        with self._lifecycle_lock:
+            with self._condition:
+                if self._reaper_thread is threading.current_thread():
+                    self._reaper_thread = None
+                if self._thread is not capture_thread:
+                    return
+                self._thread = None
+                if self._clients > 0 and not self._closed:
+                    self._start_capture_locked()
+                    return
+                self._set_idle_locked()
+                self._condition.notify_all()
+
+    def _clear_frame_visibility_locked(self):
+        self._latest_frame = None
+        self._measured_fps = 0.0
+        self._last_captured_at = None
+        self.width = self.requested_width
+        self.height = self.requested_height
+
+    def _set_idle_locked(self):
+        self._state = "idle"
+        self._device = None
+        self._error = None
+        self._clear_frame_visibility_locked()
+
+    @staticmethod
+    def _classify_open_error(error):
+        if isinstance(error, FileNotFoundError):
+            return "missing"
+        message = str(error).lower()
+        if isinstance(error, PermissionError) or any(
+            marker in message
+            for marker in ("busy", "resource", "permission", "access denied")
+        ):
+            return "busy"
+        return "disconnected"
+
+    @staticmethod
+    def _open_error_message(device, error, state):
+        message = f"camera {device} could not be opened: {error}"
+        if state == "busy":
+            return f"{message}; close other camera applications and check permissions"
+        return message
 
     def _should_stop(self, generation):
         with self._condition:

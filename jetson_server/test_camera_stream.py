@@ -60,12 +60,16 @@ class HoldingCapture(FakeCapture):
         self.release_requested.set()
 
 
-class JoinSpy:
+class UninterruptibleCapture(FakeCapture):
     def __init__(self):
-        self.timeouts = []
+        super().__init__(opened=True)
+        self.read_started = threading.Event()
+        self.allow_read_to_finish = threading.Event()
 
-    def join(self, timeout=None):
-        self.timeouts.append(timeout)
+    def read(self):
+        self.read_started.set()
+        self.allow_read_to_finish.wait()
+        return False, None
 
 
 class CameraSnapshotTest(unittest.TestCase):
@@ -160,20 +164,19 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertEqual("busy", snapshot["state"])
         self.assertEqual("/dev/video0", snapshot["device"])
         self.assertIn("did not return a frame", snapshot["error"])
+        self.assertIn("close other camera applications", snapshot["error"])
+        self.assertTrue(capture.released)
+        self.assertIsNone(service._capture)
 
     def test_first_client_starts_one_thread_and_last_client_releases_camera(self):
-        captures = []
+        capture = HoldingCapture([FakeFrame()])
+        captures = [capture]
 
-        def capture_factory(path):
-            capture = FakeCapture(opened=True, reads=[(False, None)])
-            captures.append(capture)
-            return capture
-
-        service = self.make_service(capture_factory=capture_factory)
+        service = self.make_service(capture_factory=lambda path: capture)
 
         service.acquire_client()
         service.acquire_client()
-        self.wait_for_state(service, "busy")
+        self.assertTrue(captures[0].read_blocked.wait(0.5))
 
         self.assertEqual(2, service.status()["clients"])
         self.assertEqual(1, len(captures))
@@ -185,20 +188,80 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertEqual(0, service.status()["clients"])
 
     def test_capture_thread_is_daemon_and_shutdown_join_is_bounded(self):
-        capture = FakeCapture(opened=True, reads=[(False, None)])
-        service = self.make_service(capture_factory=lambda path: capture)
+        first_capture = UninterruptibleCapture()
+        captures = []
+
+        def capture_factory(path):
+            capture = first_capture if not captures else FakeCapture(
+                opened=True, reads=[(False, None)])
+            captures.append(capture)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
         service.acquire_client()
-        self.wait_for_state(service, "busy")
+        self.assertTrue(first_capture.read_started.wait(0.5))
 
         with service._condition:
             self.assertTrue(service._thread.daemon)
-            join_spy = JoinSpy()
-            service._thread = join_spy
 
+        started_at = time.monotonic()
         service.release_client()
+        elapsed = time.monotonic() - started_at
 
-        self.assertEqual(1, len(join_spy.timeouts))
-        self.assertLessEqual(join_spy.timeouts[0], 1.0)
+        self.assertLess(elapsed, 1.2)
+        self.assertEqual("stopping", service.status()["state"])
+        service.acquire_client()
+        self.assertEqual(1, len(captures))
+        self.assertEqual("stopping", service.status()["state"])
+
+        first_capture.allow_read_to_finish.set()
+        self.wait_for_state(service, "busy", timeout=1.0)
+
+        self.assertEqual(2, len(captures))
+        self.assertTrue(first_capture.released)
+
+    def test_reaper_does_not_replace_a_newer_capture_thread(self):
+        first_capture = UninterruptibleCapture()
+        captures = []
+
+        def capture_factory(path):
+            capture = first_capture if not captures else FakeCapture(
+                opened=True, reads=[(False, None)]
+            )
+            captures.append(capture)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        self.assertTrue(first_capture.read_started.wait(0.5))
+
+        reaper_entered = threading.Event()
+        allow_reaper = threading.Event()
+        original_reap = service._reap_capture_thread
+
+        def paused_reap(thread):
+            reaper_entered.set()
+            allow_reaper.wait(0.5)
+            original_reap(thread)
+
+        service._reap_capture_thread = paused_reap
+        service.release_client()
+        self.assertTrue(reaper_entered.wait(0.5))
+        first_capture.allow_read_to_finish.set()
+        with service._condition:
+            old_thread = service._thread
+        old_thread.join(0.5)
+
+        service.acquire_client()
+        self.wait_for_state(service, "busy")
+        self.assertEqual(2, len(captures))
+        with service._condition:
+            reaper_thread = service._reaper_thread
+        allow_reaper.set()
+        reaper_thread.join(0.5)
+
+        self.assertFalse(reaper_thread.is_alive())
+        self.assertEqual(2, len(captures))
 
     def test_acquire_during_last_client_shutdown_starts_a_fresh_capture(self):
         captures = []
@@ -260,15 +323,38 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertTrue(dimensions_entered.wait(0.5))
         with service._condition:
             capture_thread = service._thread
-            service._thread = JoinSpy()
 
-        service.release_client()
+        release_finished = threading.Event()
+        release_thread = threading.Thread(
+            target=lambda: (service.release_client(), release_finished.set())
+        )
+        release_thread.start()
+        self.assertFalse(release_finished.wait(0.05))
         allow_dimensions.set()
+        release_thread.join(0.5)
         capture_thread.join(0.5)
 
         snapshot = service.status()
         self.assertEqual("idle", snapshot["state"])
         self.assertEqual(0, snapshot["sequence"])
+
+    def test_reconnect_does_not_return_cached_frame_from_previous_generation(self):
+        first_capture = HoldingCapture([FakeFrame()])
+        second_capture = HoldingCapture([])
+        captures = iter([first_capture, second_capture])
+        service = self.make_service(capture_factory=lambda path: next(captures))
+        service.acquire_client()
+        self.assertTrue(service.wait_until_ready(0.5))
+        old_sequence = service.status()["sequence"]
+        service.release_client()
+
+        service.acquire_client()
+        self.assertTrue(second_capture.read_blocked.wait(0.5))
+        sequence, jpeg = service.wait_for_frame(after_sequence=0, timeout=0.02)
+
+        self.assertEqual(0, sequence)
+        self.assertIsNone(jpeg)
+        self.assertEqual(old_sequence, service.status()["sequence"])
 
     def test_release_client_does_not_decrement_below_zero(self):
         service = self.make_service(capture_factory=lambda path: FakeCapture(opened=False))
@@ -311,6 +397,8 @@ class CameraCaptureServiceTest(unittest.TestCase):
 
         self.assertEqual(1, snapshot["sequence"])
         self.assertIn("five consecutive", snapshot["error"])
+        self.assertTrue(capture.released)
+        self.assertIsNone(service._capture)
 
     def test_successful_frame_resets_consecutive_read_failures(self):
         reads = (
@@ -374,6 +462,61 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertTrue(captures[0].released)
         self.assertEqual(1, service.status()["clients"])
 
+    def test_restart_reuses_requested_dimensions_after_reporting_actual_frame_size(self):
+        captures = [
+            HoldingCapture([FakeFrame(width=320, height=240)]),
+            FakeCapture(opened=True, reads=[(False, None)]),
+        ]
+        service = self.make_service(
+            width=800,
+            height=600,
+            capture_factory=lambda path: captures.pop(0),
+        )
+        first_capture = captures[0]
+        second_capture = captures[1]
+        service.acquire_client()
+        self.assertTrue(service.wait_until_ready(0.5))
+        self.assertEqual((320, 240), (
+            service.status()["width"], service.status()["height"]
+        ))
+
+        service.restart()
+        self.wait_for_state(service, "busy")
+
+        self.assertTrue(first_capture.released)
+        self.assertEqual([(3, 800), (4, 600), (5, 18)], second_capture.settings)
+
+    def test_permission_error_reports_busy_with_device_context(self):
+        def capture_factory(path):
+            raise PermissionError("permission denied")
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        snapshot = self.wait_for_state(service, "busy")
+
+        self.assertIn("/dev/video0", snapshot["error"])
+        self.assertIn("permission denied", snapshot["error"])
+
+    def test_resource_busy_open_error_reports_busy(self):
+        def capture_factory(path):
+            raise OSError("device or resource busy")
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        snapshot = self.wait_for_state(service, "busy")
+
+        self.assertIn("resource busy", snapshot["error"])
+
+    def test_non_absence_open_error_is_preserved_as_disconnected(self):
+        def capture_factory(path):
+            raise RuntimeError("backend initialization failed")
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        snapshot = self.wait_for_state(service, "disconnected")
+
+        self.assertIn("backend initialization failed", snapshot["error"])
+
     def test_restart_without_clients_stays_idle(self):
         attempts = []
         service = self.make_service(
@@ -384,6 +527,50 @@ class CameraCaptureServiceTest(unittest.TestCase):
 
         self.assertEqual([], attempts)
         self.assertEqual("idle", service.status()["state"])
+
+    def test_shutdown_releases_capture_clears_clients_and_rejects_new_acquires(self):
+        capture = HoldingCapture([FakeFrame()])
+        attempts = []
+
+        def capture_factory(path):
+            attempts.append(path)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        service.acquire_client()
+        self.assertTrue(capture.read_blocked.wait(0.5))
+        published_sequence = service.status()["sequence"]
+
+        service.shutdown()
+        snapshot = service.status()
+
+        self.assertTrue(capture.released)
+        self.assertEqual("idle", snapshot["state"])
+        self.assertEqual(0, snapshot["clients"])
+        self.assertEqual((0, None), service.wait_for_frame(0, 0.01))
+        self.assertGreaterEqual(snapshot["sequence"], published_sequence)
+        service.acquire_client()
+        self.assertEqual(1, len(attempts))
+        self.assertEqual(0, service.status()["clients"])
+        service.publish_encoded_frame(b"late", 640, 480, time.monotonic())
+        service.restart()
+        self.assertEqual("idle", service.status()["state"])
+        self.assertEqual((0, None), service.wait_for_frame(0, 0.01))
+        self.assertEqual(1, len(attempts))
+
+    def test_shutdown_keeps_stopping_until_blocked_thread_exits(self):
+        capture = UninterruptibleCapture()
+        service = self.make_service(capture_factory=lambda path: capture)
+        service.acquire_client()
+        self.assertTrue(capture.read_started.wait(0.5))
+
+        service.shutdown()
+
+        self.assertEqual("stopping", service.status()["state"])
+        self.assertEqual(0, service.status()["clients"])
+        capture.allow_read_to_finish.set()
+        self.wait_for_state(service, "idle", timeout=1.0)
 
 
 if __name__ == "__main__":

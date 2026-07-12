@@ -43,4 +43,22 @@ public class CarApiTest {
                 api.navigationGoalUrl(2.0, 3.45, 0.0)
         );
     }
+
+    @Test
+    public void buildsCameraUrlsFromConfiguredHostAndPort() {
+        CarApi api = new CarApi("10.161.57.230", 8000);
+
+        assertEquals("http://10.161.57.230:8000/camera/stream", api.cameraStreamUrl());
+        assertEquals("http://10.161.57.230:8000/camera/status", api.cameraStatusUrl());
+        assertEquals("http://10.161.57.230:8000/camera/restart", api.cameraRestartUrl());
+    }
+
+    @Test
+    public void cameraUrlsShareTheNormalizedBaseUrl() {
+        CarApi api = new CarApi("  https://10.161.57.230///  ", 8000);
+
+        assertEquals("http://10.161.57.230:8000/camera/stream", api.cameraStreamUrl());
+        assertEquals("http://10.161.57.230:8000/camera/status", api.cameraStatusUrl());
+        assertEquals("http://10.161.57.230:8000/camera/restart", api.cameraRestartUrl());
+    }
 }

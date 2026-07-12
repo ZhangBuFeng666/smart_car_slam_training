@@ -3,6 +3,8 @@ package com.example.icarcontroller
 import android.app.Activity
 import android.app.Dialog
 import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
@@ -17,6 +19,7 @@ import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
@@ -24,6 +27,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
@@ -47,6 +52,14 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+private data class FullscreenAccessibilityState(
+    val view: View,
+    val importantForAccessibility: Int,
+    val isFocusable: Boolean,
+    val isFocusableInTouchMode: Boolean,
+    val descendantFocusability: Int?
+)
+
 class MainActivity : Activity() {
     private lateinit var pageContent: LinearLayout
     private lateinit var scrollContent: ScrollView
@@ -65,6 +78,11 @@ class MainActivity : Activity() {
     private var txtLog: TextView? = null
     private var vehicleStage: Vehicle3DStageView? = null
     private var parkingVisionView: ParkingVisionView? = null
+    private var driveCameraPanel: DriveCameraPanel? = null
+    private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
+    private var fullscreenDrivePending = false
+    private var fullscreenAccessibilityState: List<FullscreenAccessibilityState>? = null
+    private var driveSpeedSeekBar: SeekBar? = null
     private var homeConnectionText: TextView? = null
     private var pageStatusText: TextView? = null
 
@@ -110,6 +128,7 @@ class MainActivity : Activity() {
         globalThemeToggle = findViewById(R.id.globalThemeToggle)
         globalThemeToggle.setOnClickListener {
             forceStopForExit(DriveExitEvent.THEME_CHANGE)
+            releaseDriveCameraPanel()
             parkingThemeMode = ParkingThemeSpec.nextMode(parkingThemeMode)
             parkingThemeStore.save(parkingThemeMode)
             renderPage(selectedPage)
@@ -138,6 +157,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
+        releaseDriveCameraPanel()
         vehicleStage?.destroy()
         vehicleStage = null
         stopMove()
@@ -151,17 +172,24 @@ class MainActivity : Activity() {
         super.onResume()
         vehicleStage?.onHostResume()
         parkingVisionView?.setActive(true)
+        if (selectedPage == "drive") {
+            driveCameraPanel?.start(api().cameraStreamUrl())
+        }
     }
 
     override fun onPause() {
+        exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         forceStopForExit(DriveExitEvent.APP_PAUSE)
+        driveCameraPanel?.stop()
         vehicleStage?.onHostPause()
         parkingVisionView?.setActive(false)
         super.onPause()
     }
 
     private fun renderPage(key: String) {
+        exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
+        releaseDriveCameraPanel()
         saveConnectionInputs()
         selectedPage = key
         currentDirection = null
@@ -169,6 +197,7 @@ class MainActivity : Activity() {
         txtSpeed = null
         txtDriveState = null
         txtLog = null
+        driveSpeedSeekBar = null
         vehicleStage?.destroy()
         vehicleStage = null
         parkingVisionView = null
@@ -194,6 +223,171 @@ class MainActivity : Activity() {
         scrollContent.post { scrollContent.smoothScrollTo(0, 0) }
     }
 
+    private fun releaseDriveCameraPanel() {
+        driveCameraPanel?.release()
+        driveCameraPanel = null
+    }
+
+    private fun enterFullscreenDrive() {
+        if (fullscreenDriveOverlay != null || fullscreenDrivePending) return
+        if (driveCameraPanel == null) return
+
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            showFullscreenDriveOverlay()
+        } else {
+            fullscreenDrivePending = true
+        }
+    }
+
+    private fun showFullscreenDriveOverlay() {
+        if (
+            fullscreenDriveOverlay != null ||
+            resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+        ) return
+        val panel = driveCameraPanel ?: return
+
+        val overlay = FullscreenDriveOverlay(
+            context = this,
+            streamView = panel.streamViewForReparent(),
+            directionLabel = ::directionLabel,
+            onMoveStart = ::startMove,
+            isDirectionActive = { direction -> currentDirection == direction },
+            onStop = ::stopMove,
+            onExit = { exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE) },
+            onSpeedProgressChanged = { progress ->
+                speedProgress = fullscreenSpeedSelection(progress).progress
+                updateSpeedText()
+            },
+            initialSpeedProgress = speedProgress,
+            initialSnapshot = panel.currentSnapshot(),
+            initialMotion = currentMotionLabel
+        )
+        fullscreenDrivePending = false
+        fullscreenDriveOverlay = overlay
+        hideUnderlyingAccessibility()
+        (window.decorView as ViewGroup).addView(
+            overlay,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        panel.setSnapshotObserver(overlay::updateCameraSnapshot)
+        hideDriveSystemUi()
+        overlay.requestFocus()
+    }
+
+    private fun exitFullscreenDrive(event: DriveExitEvent) {
+        val wasPending = fullscreenDrivePending
+        fullscreenDrivePending = false
+        val overlay = fullscreenDriveOverlay
+        if (overlay == null) {
+            if (wasPending) {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+            return
+        }
+        forceStopForExit(event)
+
+        val panel = driveCameraPanel
+        if (panel != null) {
+            panel.setSnapshotObserver(null)
+            panel.restoreStreamView(overlay.streamView)
+        } else {
+            overlay.streamView.beginReparent()
+            overlay.removeView(overlay.streamView)
+        }
+        (overlay.parent as? ViewGroup)?.removeView(overlay)
+        fullscreenDriveOverlay = null
+        restoreUnderlyingAccessibility()
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        showDriveSystemUi()
+    }
+
+    private fun hideDriveSystemUi() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.apply {
+                hide(WindowInsets.Type.systemBars())
+                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                )
+        }
+    }
+
+    private fun showDriveSystemUi() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.show(WindowInsets.Type.systemBars())
+        }
+        @Suppress("DEPRECATION")
+        run {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+        updateChrome(selectedPage)
+    }
+
+    private fun hideUnderlyingAccessibility() {
+        val views = listOf<View>(topBar, pageContent, bottomNav)
+        fullscreenAccessibilityState = views.map { view ->
+            FullscreenAccessibilityState(
+                view = view,
+                importantForAccessibility = view.importantForAccessibility,
+                isFocusable = view.isFocusable,
+                isFocusableInTouchMode = view.isFocusableInTouchMode,
+                descendantFocusability = (view as? ViewGroup)?.descendantFocusability
+            )
+        }
+        views.forEach { view ->
+            view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            view.isFocusable = false
+            view.isFocusableInTouchMode = false
+            (view as? ViewGroup)?.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+    }
+
+    private fun restoreUnderlyingAccessibility() {
+        fullscreenAccessibilityState?.forEach { state ->
+            state.view.importantForAccessibility = state.importantForAccessibility
+            state.view.isFocusable = state.isFocusable
+            state.view.isFocusableInTouchMode = state.isFocusableInTouchMode
+            state.descendantFocusability?.let { value ->
+                (state.view as? ViewGroup)?.descendantFocusability = value
+            }
+        }
+        fullscreenAccessibilityState = null
+    }
+
+    override fun onBackPressed() {
+        if (fullscreenDriveOverlay != null || fullscreenDrivePending) {
+            exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (fullscreenDrivePending && newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            showFullscreenDriveOverlay()
+            return
+        }
+        if (
+            fullscreenDriveOverlay != null &&
+            newConfig.orientation != Configuration.ORIENTATION_LANDSCAPE
+        ) {
+            exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
+        }
+    }
+
     private fun renderHome() {
         pageContent.addView(digitalKeyStage())
     }
@@ -205,10 +399,14 @@ class MainActivity : Activity() {
             subtitle = "停车场低速操控，按住移动，松手立即刹停。",
             status = "待连接"
         ))
-        pageContent.addView(parkingDriveStatus())
+        driveCameraPanel = DriveCameraPanel(this, parkingPalette()).also { panel ->
+            panel.layoutParams = matchWrapParams(bottom = 8)
+            panel.setOnFullscreenRequested { enterFullscreenDrive() }
+            pageContent.addView(panel)
+            panel.start(api().cameraStreamUrl())
+        }
         pageContent.addView(parkingRemoteConsole())
         updateSpeedText()
-        pageContent.addView(parkingActivityBar())
     }
 
     private fun renderAiPage() {
@@ -766,6 +964,11 @@ class MainActivity : Activity() {
     ): LinearLayout = LinearLayout(this).apply {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
+        if (selectedPage == "drive") {
+            setPadding(0, 0, 0, 0)
+            layoutParams = matchWrapParams(bottom = 0)
+            return@apply
+        }
         setPadding(dp(6), dp(22), dp(6), dp(18))
         layoutParams = matchWrapParams(bottom = 4)
         val top = LinearLayout(this@MainActivity).apply {
@@ -819,8 +1022,8 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             background = roundedBackground(palette.surface, palette.border, 18)
-            setPadding(dp(6), dp(9), dp(6), dp(9))
-            layoutParams = matchWrapParams(bottom = 12)
+        setPadding(dp(6), dp(6), dp(6), dp(6))
+        layoutParams = matchWrapParams(bottom = 8)
             items.forEachIndexed { index, item ->
                 val metric = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
@@ -839,7 +1042,7 @@ class MainActivity : Activity() {
                         textSize = 10f
                     }, matchWrapParams(top = 2))
                 }
-                addView(metric, LinearLayout.LayoutParams(0, dp(52), 1f))
+                addView(metric, LinearLayout.LayoutParams(0, dp(42), 1f))
                 if (index < items.lastIndex) {
                     addView(View(this@MainActivity).apply {
                         setBackgroundColor(color(palette.border))
@@ -855,87 +1058,50 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         background = roundedBackground(palette.surface, palette.border, 22, palette.surfaceAlt)
         elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
-        setPadding(dp(14), dp(14), dp(14), dp(14))
-        layoutParams = matchWrapParams(bottom = 12)
+        setPadding(dp(10), dp(9), dp(10), dp(10))
+        layoutParams = matchWrapParams(bottom = 8)
 
-        val top = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val titleColumn = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@MainActivity).apply {
-                text = "低速控制"
-                setTextColor(color(palette.textPrimary))
-                textSize = 20f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = "适用于车位与窄通道人工接管"
-                setTextColor(color(palette.textSecondary))
-                textSize = 11f
-            }, matchWrapParams(top = 2))
-        }
-        top.addView(titleColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        top.addView(parkingOutlineButton("底盘") {
-            sendGet(api().startTaskUrl("base"), "启动底盘驱动")
-        }, LinearLayout.LayoutParams(dp(68), dp(42)))
-        top.addView(parkingDangerButton("急停") {
-            currentDirection = null
-            mainHandler.removeCallbacks(repeatMoveRunnable)
-            sendGet(api().emergencyStopUrl(), "急停")
-        }, LinearLayout.LayoutParams(dp(72), dp(42)).apply {
-            setMargins(dp(8), 0, 0, 0)
-        })
-        addView(top)
-
-        txtDriveState = TextView(this@MainActivity).apply {
-            text = "当前动作：$currentMotionLabel"
-            setTextColor(color(palette.accentText))
-            textSize = 15f
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            background = roundedBackground(palette.accentSoft, palette.accent, 16)
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-        }
-        addView(txtDriveState, matchWrapParams(top = 13))
-        addView(parkingSpeedDeck(), matchWrapParams(top = 13))
-        addView(parkingMovementGrid(), matchWrapParams(top = 10))
+        addView(parkingSpeedDeck())
+        addView(parkingMovementGrid(), matchWrapParams(top = 6))
     }
 
     private fun parkingSpeedDeck(): LinearLayout = LinearLayout(this).apply {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
-        addView(parkingSectionTitle("速度限制", "停车场内建议保持慢速或标准档"))
         val presets = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(parkingSpeedButton("慢速", 5), LinearLayout.LayoutParams(0, dp(40), 1f))
-            addView(parkingSpeedButton("标准", 13), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            addView(parkingSpeedButton("慢速", 5), LinearLayout.LayoutParams(0, dp(34), 1f))
+            addView(parkingSpeedButton("标准", 13), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
                 setMargins(dp(7), 0, 0, 0)
             })
-            addView(parkingSpeedButton("快速", 23), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            addView(parkingSpeedButton("快速", 23), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
                 setMargins(dp(7), 0, 0, 0)
             })
         }
-        addView(presets, matchWrapParams(top = 9))
+        addView(presets)
         txtSpeed = TextView(this@MainActivity).apply {
             setTextColor(color(palette.textPrimary))
             textSize = 12f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         }
-        addView(txtSpeed, matchWrapParams(top = 9))
-        addView(SeekBar(this@MainActivity).apply {
+        addView(txtSpeed, matchWrapParams(top = 5))
+        val speedBar = SeekBar(this@MainActivity).apply {
             max = 30
             progress = speedProgress
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    speedProgress = progress
+                    speedProgress = fullscreenSpeedSelection(progress).progress
                     updateSpeedText()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             })
-        })
+        }
+        driveSpeedSeekBar = speedBar
+        addView(speedBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(34)
+        ))
     }
 
     private fun parkingSpeedButton(text: String, progress: Int): Button = Button(this).apply {
@@ -967,9 +1133,9 @@ class MainActivity : Activity() {
         addParkingMoveButton(this, "←\n左移", "left")
         addView(parkingStopButton(), parkingGridParams())
         addParkingMoveButton(this, "→\n右移", "right")
-        addView(Space(this@MainActivity), parkingGridParams())
+        addView(parkingChassisButton(), parkingGridParams())
         addParkingMoveButton(this, "↓\n后退", "back")
-        addView(Space(this@MainActivity), parkingGridParams())
+        addView(parkingEmergencyButton(), parkingGridParams())
     }
 
     private fun addParkingMoveButton(grid: GridLayout, text: String, direction: String) {
@@ -1007,6 +1173,45 @@ class MainActivity : Activity() {
         elevation = dp(InteractionSpec.parkingDriveButtonElevationDp() + 2).toFloat()
         stateListAnimator = null
         setOnClickListener { stopMove() }
+    }
+
+    private fun parkingChassisButton(): Button = Button(this).apply {
+        val palette = parkingPalette()
+        text = "◇\n底盘"
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setLineSpacing(dp(1).toFloat(), 1.0f)
+        setTextColor(color(palette.textPrimary))
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 20)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
+        stateListAnimator = null
+        setOnClickListener { sendGet(api().startTaskUrl("base"), "启动底盘驱动") }
+    }
+
+    private fun parkingEmergencyButton(): Button = Button(this).apply {
+        text = "!\n急停"
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setLineSpacing(dp(1).toFloat(), 1.0f)
+        setTextColor(color(accentOnColor()))
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground("#B8464F", "#FAD0D5", "#E06A75", 20)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp() + 2).toFloat()
+        stateListAnimator = null
+        setOnClickListener {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().emergencyStopUrl(), "急停")
+        }
     }
 
     private fun parkingGridParams(): GridLayout.LayoutParams = GridLayout.LayoutParams().apply {
@@ -2569,6 +2774,7 @@ class MainActivity : Activity() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupHoldButton(button: Button, direction: String) {
+        val tracker = HoldGestureTracker()
         button.isFocusable = true
         button.contentDescription = "${directionLabel(direction).removeSuffix("中")}，按住持续移动"
         button.setOnClickListener {
@@ -2579,26 +2785,50 @@ class MainActivity : Activity() {
             }, 320L)
         }
         button.setOnTouchListener { view, event ->
+            fun setPressed(pressed: Boolean) {
+                view.animate()
+                    .scaleX(if (pressed) InteractionSpec.pressFeedbackScale() else 1f)
+                    .scaleY(if (pressed) InteractionSpec.pressFeedbackScale() else 1f)
+                    .alpha(if (pressed) 0.86f else 1f)
+                    .setDuration(if (pressed) 90 else 180)
+                    .apply {
+                        if (!pressed) setInterpolator(OvershootInterpolator())
+                    }
+                    .start()
+            }
+
+            fun handle(action: HoldGestureAction) {
+                if (action != HoldGestureAction.STOP) return
+                setPressed(false)
+                stopMove()
+            }
+
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    view.animate()
-                        .scaleX(InteractionSpec.pressFeedbackScale())
-                        .scaleY(InteractionSpec.pressFeedbackScale())
-                        .alpha(0.86f)
-                        .setDuration(90)
-                        .start()
-                    startMove(direction)
+                    if (tracker.onDown(event.getPointerId(event.actionIndex)) == HoldGestureAction.START) {
+                        setPressed(true)
+                        startMove(direction)
+                    }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    view.animate()
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .alpha(1f)
-                        .setDuration(180)
-                        .setInterpolator(OvershootInterpolator())
-                        .start()
-                    stopMove()
+                MotionEvent.ACTION_POINTER_UP -> {
+                    handle(tracker.onPointerUp(event.getPointerId(event.actionIndex)))
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val pointerIndex = tracker.activePointerId()?.let(event::findPointerIndex) ?: -1
+                    val inside = pointerIndex >= 0 &&
+                        event.getX(pointerIndex) >= 0f && event.getX(pointerIndex) < view.width.toFloat() &&
+                        event.getY(pointerIndex) >= 0f && event.getY(pointerIndex) < view.height.toFloat()
+                    handle(tracker.onMove(pointerIndex >= 0, inside))
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    handle(tracker.onUp())
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handle(tracker.onCancel())
                     true
                 }
                 else -> true
@@ -2630,6 +2860,9 @@ class MainActivity : Activity() {
                 executorService = when (lane) {
                     StopDispatchLane.URGENT -> stopExecutor
                     StopDispatchLane.MOVE_BARRIER -> moveExecutor
+                },
+                onLatencyMillis = { latency ->
+                    fullscreenDriveOverlay?.updateControlLatency(latency)
                 }
             )
         }
@@ -2656,7 +2889,10 @@ class MainActivity : Activity() {
             label = "移动 $direction",
             quiet = true,
             executorService = moveExecutor,
-            onFinished = { moveGate.finish() }
+            onFinished = { moveGate.finish() },
+            onLatencyMillis = { latency ->
+                fullscreenDriveOverlay?.updateControlLatency(latency)
+            }
         )
     }
 
@@ -2665,13 +2901,19 @@ class MainActivity : Activity() {
         label: String,
         quiet: Boolean = false,
         executorService: ExecutorService = commandExecutor,
-        onFinished: () -> Unit = {}
+        onFinished: () -> Unit = {},
+        onLatencyMillis: ((Long) -> Unit)? = null
     ) {
         if (!quiet) {
             setStatus("$label 请求中")
         }
 
         executorService.execute {
+            val latencyMeasurement = onLatencyMillis?.let { callback ->
+                RequestLatencyMeasurement(SystemClock.elapsedRealtime()) { latency ->
+                    runOnUiThread { callback(latency) }
+                }
+            }
             val result = runCatching {
                 val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
@@ -2688,6 +2930,7 @@ class MainActivity : Activity() {
             }.getOrElse { error ->
                 "失败：${error.message ?: error.javaClass.simpleName}"
             }
+            latencyMeasurement?.complete(SystemClock.elapsedRealtime())
 
             runOnUiThread {
                 if (!quiet) {
@@ -2714,17 +2957,20 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun currentSpeed(): Double =
-        (0.05 + speedProgress / 100.0).coerceIn(0.05, 0.35)
+    private fun currentSpeed(): Double = fullscreenSpeedSelection(speedProgress).speed
 
-    private fun currentTurn(): Double =
-        (0.45 + currentSpeed() * 2.0).coerceIn(0.55, 1.15)
+    private fun currentTurn(): Double = fullscreenSpeedSelection(speedProgress).turn
 
     private fun updateSpeedText() {
         txtSpeed?.text = String.format(Locale.US, "速度 %.2f m/s，转向 %.2f rad/s", currentSpeed(), currentTurn())
+        if (driveSpeedSeekBar?.progress != speedProgress) {
+            driveSpeedSeekBar?.progress = speedProgress
+        }
+        fullscreenDriveOverlay?.updateSpeedProgress(speedProgress)
     }
 
     private fun updateDriveState() {
+        fullscreenDriveOverlay?.updateMotion(currentMotionLabel)
         txtDriveState?.animate()
             ?.alpha(0.55f)
             ?.scaleX(0.98f)

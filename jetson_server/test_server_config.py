@@ -1,5 +1,10 @@
+import argparse
+import errno
+import http.client
 import json
 import queue
+import socket
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -74,6 +79,48 @@ class ServerConfigTest(unittest.TestCase):
         self.assertTrue(hasattr(server, "TASK_PATTERNS"), "server is missing TASK_PATTERNS")
         self.assertEqual(set(server.TASK_COMMANDS), set(server.TASK_PATTERNS))
 
+    def test_camera_factory_preserves_local_device_and_stream_settings(self):
+        camera = server.create_camera_stream(
+            device="/dev/video13",
+            width=640,
+            height=480,
+            fps=18,
+            quality=70,
+        )
+
+        self.assertEqual("/dev/video13", camera.configured_device)
+        self.assertEqual(640, camera.width)
+        self.assertEqual(480, camera.height)
+        self.assertEqual(18, camera.target_fps)
+        self.assertEqual(70, camera.jpeg_quality)
+
+    def test_positive_int_accepts_positive_values(self):
+        self.assertEqual(1, server.positive_int("1"))
+        self.assertEqual(640, server.positive_int("640"))
+
+    def test_positive_int_rejects_zero_negative_and_non_integer_values(self):
+        for value in ("0", "-1", "1.5", "invalid"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                server.positive_int(value)
+
+    def test_jpeg_quality_accepts_bounds(self):
+        self.assertEqual(1, server.jpeg_quality("1"))
+        self.assertEqual(100, server.jpeg_quality("100"))
+
+    def test_jpeg_quality_rejects_values_outside_bounds(self):
+        for value in ("0", "101", "invalid"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                server.jpeg_quality(value)
+
+    def test_port_number_accepts_valid_bounds(self):
+        self.assertEqual(1, server.port_number("1"))
+        self.assertEqual(65535, server.port_number("65535"))
+
+    def test_port_number_rejects_values_outside_valid_range(self):
+        for value in ("0", "65536", "-1", "1.5", "invalid"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                server.port_number(value)
+
 
 class FakeMotionBridge:
     def __init__(self, ready=True):
@@ -99,9 +146,128 @@ class FailingMotionBridge(FakeMotionBridge):
         raise RuntimeError("bridge offline")
 
 
+class FakeCameraService:
+    def __init__(self, state="idle"):
+        self.state = state
+        self.restart_calls = 0
+
+    def status(self):
+        return {
+            "state": self.state,
+            "device": "/dev/video13",
+            "clients": 0,
+            "fps": 18.0,
+            "width": 640,
+            "height": 480,
+            "sequence": 12,
+            "error": None,
+        }
+
+    def restart(self):
+        self.restart_calls += 1
+        self.state = "connecting"
+        return self.status()
+
+
+class ServerMainLifecycleTest(unittest.TestCase):
+    def test_main_shuts_down_camera_before_closing_server(self):
+        events = []
+
+        class LifecycleCamera:
+            def shutdown(self):
+                events.append("camera.shutdown")
+
+        class LifecycleBridge:
+            def shutdown(self):
+                events.append("motion.shutdown")
+
+        class LifecycleServer:
+            def __init__(self, address, handler):
+                self.address = address
+                self.handler = handler
+
+            def serve_forever(self):
+                events.append("serve_forever")
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                events.append("server.close")
+
+        def restore_global(name, existed, value):
+            if existed:
+                setattr(server, name, value)
+            elif hasattr(server, name):
+                delattr(server, name)
+
+        camera_existed = hasattr(server, "CAMERA_STREAM")
+        bridge_existed = hasattr(server, "MOTION_BRIDGE")
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        original_bridge = getattr(server, "MOTION_BRIDGE", None)
+        self.addCleanup(restore_global, "CAMERA_STREAM", camera_existed, original_camera)
+        self.addCleanup(restore_global, "MOTION_BRIDGE", bridge_existed, original_bridge)
+
+        with patch("sys.argv", ["server.py", "--dry-run"]), patch.object(
+            server, "create_camera_stream", return_value=LifecycleCamera()
+        ), patch.object(
+            server, "create_motion_bridge", return_value=LifecycleBridge()
+        ), patch.object(
+            server, "ThreadingHTTPServer", LifecycleServer
+        ), self.assertRaises(KeyboardInterrupt):
+            server.main()
+
+        self.assertEqual(
+            ["serve_forever", "camera.shutdown", "server.close", "motion.shutdown"],
+            events,
+        )
+
+    def test_main_shuts_down_services_when_server_bind_fails(self):
+        events = []
+
+        class LifecycleCamera:
+            def shutdown(self):
+                events.append("camera.shutdown")
+
+        class LifecycleBridge:
+            def shutdown(self):
+                events.append("motion.shutdown")
+
+        def failing_server_factory(address, handler):
+            events.append("server.bind")
+            raise OSError("address already in use")
+
+        camera_existed = hasattr(server, "CAMERA_STREAM")
+        bridge_existed = hasattr(server, "MOTION_BRIDGE")
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        original_bridge = getattr(server, "MOTION_BRIDGE", None)
+
+        def restore_global(name, existed, value):
+            if existed:
+                setattr(server, name, value)
+            elif hasattr(server, name):
+                delattr(server, name)
+
+        self.addCleanup(restore_global, "CAMERA_STREAM", camera_existed, original_camera)
+        self.addCleanup(restore_global, "MOTION_BRIDGE", bridge_existed, original_bridge)
+
+        with patch("sys.argv", ["server.py", "--dry-run"]), patch.object(
+            server, "create_camera_stream", return_value=LifecycleCamera()
+        ), patch.object(
+            server, "create_motion_bridge", return_value=LifecycleBridge()
+        ), patch.object(
+            server, "ThreadingHTTPServer", side_effect=failing_server_factory
+        ), self.assertRaisesRegex(OSError, "address already in use"):
+            server.main()
+
+        self.assertEqual(
+            ["server.bind", "camera.shutdown", "motion.shutdown"],
+            events,
+        )
+
+
 class MotionRouteTest(unittest.TestCase):
     def setUp(self):
         self.original_bridge = getattr(server, "MOTION_BRIDGE", None)
+        self.original_camera = getattr(server, "CAMERA_STREAM", None)
         self.original_dry_run = server.SERVER_CONFIG["dry_run"]
         self.original_container_running = getattr(server, "container_is_running", None)
         self.original_task_processes = getattr(server, "task_processes", None)
@@ -116,6 +282,11 @@ class MotionRouteTest(unittest.TestCase):
                 delattr(server, "MOTION_BRIDGE")
         else:
             server.MOTION_BRIDGE = self.original_bridge
+        if self.original_camera is None:
+            if hasattr(server, "CAMERA_STREAM"):
+                delattr(server, "CAMERA_STREAM")
+        else:
+            server.CAMERA_STREAM = self.original_camera
         if self.original_container_running is not None:
             server.container_is_running = self.original_container_running
         if self.original_task_processes is not None:
@@ -169,6 +340,48 @@ class MotionRouteTest(unittest.TestCase):
         self.assertTrue(body["base"]["running"])
         self.assertEqual("42 process", body["base"]["process"])
         self.assertFalse(body["lidar"]["running"])
+
+    def test_camera_status_route_returns_capture_snapshot(self):
+        server.CAMERA_STREAM = FakeCameraService(state="live")
+
+        status, body = self.handler.route("camera/status", {})
+
+        self.assertEqual(200, status)
+        self.assertEqual("live", body["state"])
+        self.assertEqual("/dev/video13", body["device"])
+        self.assertEqual(640, body["width"])
+
+    def test_camera_restart_route_reopens_local_device(self):
+        camera = FakeCameraService(state="busy")
+        server.CAMERA_STREAM = camera
+
+        status, body = self.handler.route("camera/restart", {})
+
+        self.assertEqual(200, status)
+        self.assertEqual(1, camera.restart_calls)
+        self.assertEqual("connecting", body["state"])
+
+    def test_camera_status_route_returns_503_when_service_is_unavailable(self):
+        server.CAMERA_STREAM = None
+
+        status, body = self.handler.route("camera/status", {})
+
+        self.assertEqual(503, status)
+        self.assertEqual(
+            {"state": "unavailable", "error": "camera service unavailable"},
+            body,
+        )
+
+    def test_camera_restart_route_returns_503_when_service_is_unavailable(self):
+        server.CAMERA_STREAM = None
+
+        status, body = self.handler.route("camera/restart", {})
+
+        self.assertEqual(503, status)
+        self.assertEqual(
+            {"state": "unavailable", "error": "camera service unavailable"},
+            body,
+        )
 
     def test_emergency_stop_uses_persistent_bridge(self):
         bridge = FakeMotionBridge()
@@ -362,6 +575,245 @@ class MotionBridgeClientTest(unittest.TestCase):
     def required_client(self):
         self.assertTrue(hasattr(server, "MotionBridgeClient"), "server is missing MotionBridgeClient")
         return server.MotionBridgeClient
+
+
+class CameraStreamHttpTest(unittest.TestCase):
+    def test_mjpeg_chunk_has_boundary_length_and_jpeg(self):
+        jpeg = b"\xff\xd8frame\xff\xd9"
+
+        chunk = server.build_mjpeg_chunk(jpeg)
+
+        self.assertTrue(chunk.startswith(b"--frame\r\n"))
+        self.assertIn(b"Content-Type: image/jpeg\r\n", chunk)
+        self.assertIn(b"Content-Length: 9\r\n", chunk)
+        self.assertTrue(chunk.endswith(jpeg + b"\r\n"))
+
+    def test_stream_writes_frame_and_releases_client_after_disconnect(self):
+        camera = FakeStreamingCamera(ready=True)
+        handler = self.streaming_handler(disconnect_on_write=True)
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        try:
+            handler.stream_camera()
+        finally:
+            server.CAMERA_STREAM = original_camera
+
+        self.assertEqual(200, handler.response_code)
+        self.assertEqual(
+            "multipart/x-mixed-replace; boundary=frame",
+            handler.headers["Content-Type"],
+        )
+        self.assertIn(b"\xff\xd8frame\xff\xd9", handler.wfile.payload)
+        self.assertEqual(1, camera.acquire_calls)
+        self.assertEqual(1, camera.release_calls)
+
+    def test_stream_returns_503_and_releases_when_camera_is_busy(self):
+        camera = FakeStreamingCamera(ready=False, state="busy")
+        handler = self.streaming_handler(disconnect_on_write=False)
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        try:
+            handler.stream_camera()
+        finally:
+            server.CAMERA_STREAM = original_camera
+
+        self.assertEqual(503, handler.response_code)
+        self.assertIn(b"camera busy", handler.wfile.payload)
+        self.assertEqual(1, camera.release_calls)
+
+    def test_stream_ends_and_releases_when_live_camera_disconnects(self):
+        camera = FakeStreamingCamera(ready=True, state="disconnected", frame=None)
+        handler = self.streaming_handler(disconnect_on_write=False)
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        try:
+            handler.stream_camera()
+        finally:
+            server.CAMERA_STREAM = original_camera
+
+        self.assertEqual(1, camera.wait_calls)
+        self.assertEqual(1, camera.release_calls)
+
+    def test_stream_write_timeout_releases_camera_and_restores_socket_timeout(self):
+        camera = FakeStreamingCamera(ready=True)
+        connection = FakeConnection(timeout=None)
+        handler = self.streaming_handler(
+            disconnect_on_write=False,
+            write_error=socket.timeout("slow client"),
+            connection=connection,
+        )
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        try:
+            handler.stream_camera()
+        finally:
+            server.CAMERA_STREAM = original_camera
+
+        self.assertEqual([2.0, None], connection.timeouts)
+        self.assertEqual(1, camera.release_calls)
+
+    def test_stream_disconnect_oserror_releases_camera(self):
+        camera = FakeStreamingCamera(ready=True)
+        handler = self.streaming_handler(
+            disconnect_on_write=False,
+            write_error=OSError(errno.ECONNRESET, "connection reset"),
+        )
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        try:
+            handler.stream_camera()
+        finally:
+            server.CAMERA_STREAM = original_camera
+
+        self.assertEqual(1, camera.release_calls)
+
+    def test_actual_camera_status_unavailable_response_has_json_headers(self):
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = None
+        http_server = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1",
+                http_server.server_address[1],
+                timeout=2.0,
+            )
+            connection.request("GET", "/camera/status")
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+        finally:
+            http_server.shutdown()
+            http_server.server_close()
+            thread.join(timeout=2.0)
+            server.CAMERA_STREAM = original_camera
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(503, response.status)
+        self.assertEqual("application/json; charset=utf-8", response.getheader("Content-Type"))
+        self.assertEqual("*", response.getheader("Access-Control-Allow-Origin"))
+        self.assertEqual(
+            {"state": "unavailable", "error": "camera service unavailable"},
+            payload,
+        )
+
+    def test_actual_camera_stream_has_no_cache_headers_and_releases_client(self):
+        camera = OneFrameStreamingCamera()
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        server.CAMERA_STREAM = camera
+        http_server = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1",
+                http_server.server_address[1],
+                timeout=2.0,
+            )
+            connection.request("GET", "/camera/stream")
+            response = connection.getresponse()
+            payload = response.read()
+            connection.close()
+        finally:
+            http_server.shutdown()
+            http_server.server_close()
+            thread.join(timeout=2.0)
+            server.CAMERA_STREAM = original_camera
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(200, response.status)
+        self.assertEqual("no-store, no-cache, must-revalidate", response.getheader("Cache-Control"))
+        self.assertEqual("no-cache", response.getheader("Pragma"))
+        self.assertIn(b"\xff\xd8frame\xff\xd9", payload)
+        self.assertEqual(1, camera.acquire_calls)
+        self.assertEqual(1, camera.release_calls)
+
+    @staticmethod
+    def streaming_handler(disconnect_on_write, write_error=None, connection=None):
+        handler = object.__new__(server.Handler)
+        handler.response_code = None
+        handler.headers = {}
+        handler.wfile = DisconnectingOutput(disconnect_on_write, write_error=write_error)
+        if connection is not None:
+            handler.connection = connection
+        handler.send_response = lambda code: setattr(handler, "response_code", code)
+        handler.send_header = lambda key, value: handler.headers.__setitem__(key, value)
+        handler.end_headers = lambda: None
+        return handler
+
+
+class FakeStreamingCamera:
+    def __init__(self, ready, state="live", frame=b"\xff\xd8frame\xff\xd9"):
+        self.ready = ready
+        self.state = state
+        self.frame = frame
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self.wait_calls = 0
+
+    def acquire_client(self):
+        self.acquire_calls += 1
+
+    def release_client(self):
+        self.release_calls += 1
+
+    def wait_until_ready(self, timeout):
+        return self.ready
+
+    def wait_for_frame(self, after_sequence, timeout):
+        self.wait_calls += 1
+        if self.wait_calls > 1:
+            raise AssertionError("stream loop continued after terminal camera state")
+        return 1, self.frame
+
+    def status(self):
+        return {
+            "state": self.state,
+            "error": f"camera {self.state}",
+        }
+
+
+class OneFrameStreamingCamera(FakeStreamingCamera):
+    def __init__(self):
+        super().__init__(ready=True)
+
+    def wait_for_frame(self, after_sequence, timeout):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            return 1, self.frame
+        self.state = "disconnected"
+        return 1, None
+
+
+class FakeConnection:
+    def __init__(self, timeout):
+        self.timeout = timeout
+        self.timeouts = []
+
+    def gettimeout(self):
+        return self.timeout
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+        self.timeouts.append(timeout)
+
+
+class DisconnectingOutput:
+    def __init__(self, disconnect_on_write, write_error=None):
+        self.payload = b""
+        self.disconnect_on_write = disconnect_on_write
+        self.write_error = write_error
+
+    def write(self, value):
+        self.payload += value
+        if self.write_error is not None:
+            raise self.write_error
+        if self.disconnect_on_write:
+            raise BrokenPipeError("client disconnected")
+
+    def flush(self):
+        pass
 
 
 if __name__ == "__main__":

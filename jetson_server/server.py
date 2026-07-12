@@ -264,6 +264,16 @@ def jpeg_quality(value):
     return parsed
 
 
+def port_number(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 65535")
+    if not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 65535")
+    return parsed
+
+
 def is_stream_disconnect(error):
     if isinstance(
         error,
@@ -653,7 +663,7 @@ def main():
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default="8b98")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=port_number, default=8000)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--camera-device", default=None)
     parser.add_argument("--camera-width", type=positive_int, default=640)
@@ -683,9 +693,10 @@ def main():
         except Exception as error:
             print(f"Motion bridge warm-up failed: {error}")
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Smart car HTTP server on {args.host}:{args.port}, container={args.container}")
+    server = None
     try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+        print(f"Smart car HTTP server on {args.host}:{args.port}, container={args.container}")
         server.serve_forever()
     finally:
         try:
@@ -693,7 +704,8 @@ def main():
                 CAMERA_STREAM.shutdown()
         finally:
             try:
-                server.server_close()
+                if server is not None:
+                    server.server_close()
             finally:
                 if MOTION_BRIDGE is not None:
                     MOTION_BRIDGE.shutdown()

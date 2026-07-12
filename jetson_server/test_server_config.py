@@ -112,6 +112,15 @@ class ServerConfigTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
                 server.jpeg_quality(value)
 
+    def test_port_number_accepts_valid_bounds(self):
+        self.assertEqual(1, server.port_number("1"))
+        self.assertEqual(65535, server.port_number("65535"))
+
+    def test_port_number_rejects_values_outside_valid_range(self):
+        for value in ("0", "65536", "-1", "1.5", "invalid"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                server.port_number(value)
+
 
 class FakeMotionBridge:
     def __init__(self, ready=True):
@@ -208,6 +217,49 @@ class ServerMainLifecycleTest(unittest.TestCase):
 
         self.assertEqual(
             ["serve_forever", "camera.shutdown", "server.close", "motion.shutdown"],
+            events,
+        )
+
+    def test_main_shuts_down_services_when_server_bind_fails(self):
+        events = []
+
+        class LifecycleCamera:
+            def shutdown(self):
+                events.append("camera.shutdown")
+
+        class LifecycleBridge:
+            def shutdown(self):
+                events.append("motion.shutdown")
+
+        def failing_server_factory(address, handler):
+            events.append("server.bind")
+            raise OSError("address already in use")
+
+        camera_existed = hasattr(server, "CAMERA_STREAM")
+        bridge_existed = hasattr(server, "MOTION_BRIDGE")
+        original_camera = getattr(server, "CAMERA_STREAM", None)
+        original_bridge = getattr(server, "MOTION_BRIDGE", None)
+
+        def restore_global(name, existed, value):
+            if existed:
+                setattr(server, name, value)
+            elif hasattr(server, name):
+                delattr(server, name)
+
+        self.addCleanup(restore_global, "CAMERA_STREAM", camera_existed, original_camera)
+        self.addCleanup(restore_global, "MOTION_BRIDGE", bridge_existed, original_bridge)
+
+        with patch("sys.argv", ["server.py", "--dry-run"]), patch.object(
+            server, "create_camera_stream", return_value=LifecycleCamera()
+        ), patch.object(
+            server, "create_motion_bridge", return_value=LifecycleBridge()
+        ), patch.object(
+            server, "ThreadingHTTPServer", side_effect=failing_server_factory
+        ), self.assertRaisesRegex(OSError, "address already in use"):
+            server.main()
+
+        self.assertEqual(
+            ["server.bind", "camera.shutdown", "motion.shutdown"],
             events,
         )
 

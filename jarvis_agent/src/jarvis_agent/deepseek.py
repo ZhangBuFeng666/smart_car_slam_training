@@ -93,7 +93,7 @@ def _parse_plan_response(response: httpx.Response) -> MissionPlan:
     try:
         data = response.json()
         content = data["choices"][0]["message"]["content"]
-        payload = json.loads(_strip_markdown_fence(content))
+        payload = _normalize_plan_payload(json.loads(_strip_markdown_fence(content)))
         plan = MissionPlan.model_validate(payload)
         return validate_plan(plan)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
@@ -111,3 +111,54 @@ def _strip_markdown_fence(content: str) -> str:
     if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip() == "```":
         return "\n".join(lines[1:-1]).strip()
     return text
+
+
+def _normalize_plan_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized = dict(payload)
+    completion_criteria = normalized.get("completion_criteria")
+    if isinstance(completion_criteria, str):
+        normalized["completion_criteria"] = [completion_criteria]
+
+    steps = normalized.get("steps")
+    if isinstance(steps, list):
+        normalized_steps = []
+        for step in steps:
+            if isinstance(step, dict) and "arguments" not in step and "params" in step:
+                step = dict(step)
+                step["arguments"] = step.pop("params")
+            elif isinstance(step, dict) and "arguments" not in step:
+                step = _normalize_step_payload(step)
+            normalized_steps.append(step)
+        normalized["steps"] = normalized_steps
+
+    return normalized
+
+
+def _normalize_step_payload(step: Dict[str, Any]) -> Dict[str, Any]:
+    action = step.get("action")
+    normalized = {"action": action}
+
+    if action in {Action.START_TASK.value, Action.STOP_TASK.value}:
+        if "task" in step:
+            normalized["arguments"] = {"task": step["task"]}
+        else:
+            normalized["arguments"] = {}
+    elif action in {
+        Action.CHECK_STATUS.value,
+        Action.STOP_ALL.value,
+        Action.GENERATE_REPORT.value,
+    }:
+        normalized["arguments"] = {}
+    elif action == Action.ASK_USER.value:
+        normalized["arguments"] = {"question": step.get("question", "")}
+    elif action == Action.RECORD_EVENT.value:
+        label = step.get("label", step.get("event", "model event"))
+        event_type = step.get("event_type", "model_note")
+        normalized["arguments"] = {"event_type": event_type, "label": label}
+    else:
+        normalized.update(step)
+
+    return normalized

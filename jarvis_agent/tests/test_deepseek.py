@@ -111,6 +111,75 @@ async def test_markdown_fenced_json_is_accepted():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_model_params_and_string_completion_criteria_are_normalized():
+    content = json.dumps(
+        {
+            "summary": "Ask user to clarify.",
+            "steps": [
+                {
+                    "action": "ASK_USER",
+                    "params": {"question": "Please describe the patrol again."},
+                }
+            ],
+            "completion_criteria": "User provides a clear instruction.",
+            "requires_confirmation": False,
+        }
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+    )
+
+    plan = await DeepSeekPlanner(settings()).plan("patrol", {})
+
+    assert plan.steps[0].arguments == {
+        "question": "Please describe the patrol again."
+    }
+    assert plan.completion_criteria == ["User provides a clear instruction."]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_flat_step_fields_are_normalized_into_safe_arguments():
+    content = json.dumps(
+        {
+            "summary": "Start patrol.",
+            "steps": [
+                {"action": "START_TASK", "task": "camera"},
+                {"action": "CHECK_STATUS", "task": "camera"},
+                {"action": "RECORD_EVENT", "event": "Patrol started"},
+                {
+                    "action": "ASK_USER",
+                    "question": "Continue?",
+                    "condition": "on detection",
+                },
+            ],
+            "completion_criteria": "Done.",
+            "requires_confirmation": True,
+        }
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+    )
+
+    plan = await DeepSeekPlanner(settings()).plan("patrol", {})
+
+    assert plan.steps[0].arguments == {"task": "camera"}
+    assert plan.steps[1].arguments == {}
+    assert plan.steps[2].arguments == {
+        "event_type": "model_note",
+        "label": "Patrol started",
+    }
+    assert plan.steps[3].arguments == {"question": "Continue?"}
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_invalid_action_is_rejected():
     bad_plan = dict(VALID_PLAN)
     bad_plan["steps"] = [{"action": "MOVE", "arguments": {"direction": "forward"}}]

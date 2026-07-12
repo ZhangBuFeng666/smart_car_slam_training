@@ -15,7 +15,7 @@ public class JarvisUiSpecTest {
 
     @Test
     public void primaryActionsMatchMissionWorkflow() {
-        assertEquals("生成计划", JarvisUiSpec.primaryActions().get(0));
+        assertEquals("发送", JarvisUiSpec.primaryActions().get(0));
         assertEquals("确认执行", JarvisUiSpec.primaryActions().get(1));
         assertEquals("刷新任务", JarvisUiSpec.secondaryActions().get(0));
         assertEquals("查看报告", JarvisUiSpec.secondaryActions().get(1));

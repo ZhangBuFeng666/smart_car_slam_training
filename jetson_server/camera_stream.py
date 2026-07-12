@@ -67,6 +67,7 @@ class CameraCaptureService:
         self.jpeg_encoder = jpeg_encoder
         self.clock = clock
 
+        self._lifecycle_lock = threading.Lock()
         self._condition = threading.Condition()
         self._clients = 0
         self._latest_frame = None
@@ -82,33 +83,35 @@ class CameraCaptureService:
         self._generation = 0
 
     def acquire_client(self):
-        with self._condition:
-            previous_clients = self._clients
-            self._clients += 1
-            if previous_clients == 0:
-                self._start_capture_locked()
-            return self._status_locked()
+        with self._lifecycle_lock:
+            with self._condition:
+                previous_clients = self._clients
+                self._clients += 1
+                if previous_clients == 0:
+                    self._start_capture_locked()
+                return self._status_locked()
 
     def release_client(self):
-        with self._condition:
-            if self._clients == 0:
-                return self._status_locked()
-            self._clients -= 1
-            should_stop = self._clients == 0
+        with self._lifecycle_lock:
+            with self._condition:
+                if self._clients == 0:
+                    return self._status_locked()
+                self._clients -= 1
+                should_stop = self._clients == 0
 
-        if should_stop:
-            self._shutdown_capture()
-        return self.status()
+            if should_stop:
+                self._shutdown_capture()
+            return self.status()
 
     def restart(self):
-        with self._condition:
-            has_clients = self._clients > 0
-        self._shutdown_capture()
-        if has_clients:
+        with self._lifecycle_lock:
             with self._condition:
-                if self._clients > 0:
+                has_clients = self._clients > 0
+            self._shutdown_capture()
+            if has_clients:
+                with self._condition:
                     self._start_capture_locked()
-        return self.status()
+            return self.status()
 
     def status(self):
         with self._condition:
@@ -135,7 +138,16 @@ class CameraCaptureService:
             return self._sequence, self._latest_frame
 
     def publish_encoded_frame(self, frame, width, height, captured_at):
+        return self._publish_encoded_frame(frame, width, height, captured_at)
+
+    def _publish_encoded_frame(
+        self, frame, width, height, captured_at, generation=None
+    ):
         with self._condition:
+            if generation is not None and (
+                self._generation != generation or self._stop_requested
+            ):
+                return None
             if self._last_captured_at is not None and captured_at > self._last_captured_at:
                 self._measured_fps = 1.0 / (captured_at - self._last_captured_at)
             self._last_captured_at = captured_at
@@ -289,8 +301,10 @@ class CameraCaptureService:
         if self._should_stop(generation):
             return False
         width, height = self._frame_dimensions(frame)
-        self.publish_encoded_frame(encoded, width, height, self.clock())
-        return True
+        sequence = self._publish_encoded_frame(
+            encoded, width, height, self.clock(), generation=generation
+        )
+        return sequence is not None
 
     def _frame_dimensions(self, frame):
         shape = getattr(frame, "shape", None)

@@ -38,6 +38,36 @@ class FakeCapture:
         self.released = True
 
 
+class HoldingCapture(FakeCapture):
+    def __init__(self, reads):
+        super().__init__(opened=True, reads=reads)
+        self.read_blocked = threading.Event()
+        self.release_requested = threading.Event()
+
+    def read(self):
+        try:
+            item = next(self.reads)
+        except StopIteration:
+            self.read_blocked.set()
+            self.release_requested.wait()
+            return False, None
+        if isinstance(item, tuple):
+            return item
+        return True, item
+
+    def release(self):
+        super().release()
+        self.release_requested.set()
+
+
+class JoinSpy:
+    def __init__(self):
+        self.timeouts = []
+
+    def join(self, timeout=None):
+        self.timeouts.append(timeout)
+
+
 class CameraSnapshotTest(unittest.TestCase):
     def test_snapshot_is_frozen_and_has_the_public_status_fields(self):
         snapshot = CameraSnapshot("idle", None, 0, 0.0, 640, 480, 0, None)
@@ -154,6 +184,92 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.assertEqual("idle", service.status()["state"])
         self.assertEqual(0, service.status()["clients"])
 
+    def test_capture_thread_is_daemon_and_shutdown_join_is_bounded(self):
+        capture = FakeCapture(opened=True, reads=[(False, None)])
+        service = self.make_service(capture_factory=lambda path: capture)
+        service.acquire_client()
+        self.wait_for_state(service, "busy")
+
+        with service._condition:
+            self.assertTrue(service._thread.daemon)
+            join_spy = JoinSpy()
+            service._thread = join_spy
+
+        service.release_client()
+
+        self.assertEqual(1, len(join_spy.timeouts))
+        self.assertLessEqual(join_spy.timeouts[0], 1.0)
+
+    def test_acquire_during_last_client_shutdown_starts_a_fresh_capture(self):
+        captures = []
+
+        def capture_factory(path):
+            capture = FakeCapture(opened=True, reads=[(False, None)])
+            captures.append(capture)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        self.wait_for_state(service, "busy")
+
+        shutdown_entered = threading.Event()
+        allow_shutdown = threading.Event()
+        original_shutdown = service._shutdown_capture
+
+        def paused_shutdown():
+            shutdown_entered.set()
+            allow_shutdown.wait(0.5)
+            original_shutdown()
+
+        service._shutdown_capture = paused_shutdown
+        release_thread = threading.Thread(target=service.release_client)
+        release_thread.start()
+        self.assertTrue(shutdown_entered.wait(0.5))
+
+        acquire_finished = threading.Event()
+        acquire_thread = threading.Thread(
+            target=lambda: (service.acquire_client(), acquire_finished.set())
+        )
+        acquire_thread.start()
+        self.assertFalse(acquire_finished.wait(0.05))
+        allow_shutdown.set()
+        release_thread.join(0.5)
+        acquire_thread.join(0.5)
+
+        self.assertFalse(release_thread.is_alive())
+        self.assertFalse(acquire_thread.is_alive())
+        self.assertTrue(acquire_finished.is_set())
+        snapshot = self.wait_for_state(service, "busy")
+        self.assertEqual(1, snapshot["clients"])
+        self.assertEqual(2, len(captures))
+        self.assertTrue(captures[0].released)
+
+    def test_stale_capture_generation_cannot_publish_after_shutdown(self):
+        capture = FakeCapture(opened=True, reads=[FakeFrame()])
+        service = self.make_service(capture_factory=lambda path: capture)
+        dimensions_entered = threading.Event()
+        allow_dimensions = threading.Event()
+
+        def paused_dimensions(frame):
+            dimensions_entered.set()
+            allow_dimensions.wait(0.5)
+            return 640, 480
+
+        service._frame_dimensions = paused_dimensions
+        service.acquire_client()
+        self.assertTrue(dimensions_entered.wait(0.5))
+        with service._condition:
+            capture_thread = service._thread
+            service._thread = JoinSpy()
+
+        service.release_client()
+        allow_dimensions.set()
+        capture_thread.join(0.5)
+
+        snapshot = service.status()
+        self.assertEqual("idle", snapshot["state"])
+        self.assertEqual(0, snapshot["sequence"])
+
     def test_release_client_does_not_decrement_below_zero(self):
         service = self.make_service(capture_factory=lambda path: FakeCapture(opened=False))
 
@@ -195,6 +311,23 @@ class CameraCaptureServiceTest(unittest.TestCase):
 
         self.assertEqual(1, snapshot["sequence"])
         self.assertIn("five consecutive", snapshot["error"])
+
+    def test_successful_frame_resets_consecutive_read_failures(self):
+        reads = (
+            [FakeFrame()]
+            + [(False, None)] * 4
+            + [FakeFrame()]
+            + [(False, None)] * 4
+        )
+        capture = HoldingCapture(reads)
+        service = self.make_service(capture_factory=lambda path: capture)
+
+        service.acquire_client()
+        self.assertTrue(capture.read_blocked.wait(0.5))
+        snapshot = service.status()
+
+        self.assertEqual("live", snapshot["state"])
+        self.assertEqual(2, snapshot["sequence"])
 
     def test_publish_and_wait_for_frame_only_return_new_sequences(self):
         service = self.make_service(capture_factory=lambda path: FakeCapture(opened=False))

@@ -59,7 +59,13 @@ public class InteractionSpecTest {
 
     @Test
     public void parkingPatrolPagesPrioritizeOperationalSurfaces() {
-        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") >= 76);
+        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") >= 60);
+        assertTrue((Integer) requiredSpec("parkingDriveControlSizeDp") <= 66);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraWidthUnits") >= 10);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraWidthUnits") <= 12);
+        assertTrue((Integer) requiredSpec("drivePortraitCameraHeightUnits") <= 9);
+        assertEquals("speed_only", requiredSpec("drivePortraitInfoPanelMode"));
+        assertEquals("grid_corners", requiredSpec("driveAuxiliaryButtonPlacement"));
         assertTrue((Integer) requiredSpec("parkingTaskRailHeightDp") >= 108);
         assertTrue((Integer) requiredSpec("parkingVisionStageHeightDp") >= 280);
         assertTrue((Integer) requiredSpec("parkingMapStageHeightDp") >= 300);

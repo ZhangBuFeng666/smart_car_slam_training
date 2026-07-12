@@ -61,7 +61,19 @@ object InteractionSpec {
     fun remoteRepeatMillis(): Int = 120
 
     @JvmStatic
-    fun parkingDriveControlSizeDp(): Int = 78
+    fun parkingDriveControlSizeDp(): Int = 62
+
+    @JvmStatic
+    fun drivePortraitCameraWidthUnits(): Int = 10
+
+    @JvmStatic
+    fun drivePortraitCameraHeightUnits(): Int = 9
+
+    @JvmStatic
+    fun drivePortraitInfoPanelMode(): String = "speed_only"
+
+    @JvmStatic
+    fun driveAuxiliaryButtonPlacement(): String = "grid_corners"
 
     @JvmStatic
     fun parkingTaskRailHeightDp(): Int = 116
@@ -112,7 +124,7 @@ object InteractionSpec {
     fun cameraFullscreenUsesControlPanels(): Boolean = false
 
     @JvmStatic
-    fun cameraGlassButtonAlpha(): Float = 0.18f
+    fun cameraGlassButtonAlpha(): Float = 0.12f
 
     @JvmStatic
     fun cameraDecodeSampleSize(sourceWidth: Int, sourceHeight: Int): Int {

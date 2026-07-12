@@ -400,15 +400,13 @@ class MainActivity : Activity() {
             status = "待连接"
         ))
         driveCameraPanel = DriveCameraPanel(this, parkingPalette()).also { panel ->
-            panel.layoutParams = matchWrapParams(bottom = 12)
+            panel.layoutParams = matchWrapParams(bottom = 8)
             panel.setOnFullscreenRequested { enterFullscreenDrive() }
             pageContent.addView(panel)
             panel.start(api().cameraStreamUrl())
         }
-        pageContent.addView(parkingDriveStatus())
         pageContent.addView(parkingRemoteConsole())
         updateSpeedText()
-        pageContent.addView(parkingActivityBar())
     }
 
     private fun renderAiPage() {
@@ -966,6 +964,11 @@ class MainActivity : Activity() {
     ): LinearLayout = LinearLayout(this).apply {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
+        if (selectedPage == "drive") {
+            setPadding(0, 0, 0, 0)
+            layoutParams = matchWrapParams(bottom = 0)
+            return@apply
+        }
         setPadding(dp(6), dp(22), dp(6), dp(18))
         layoutParams = matchWrapParams(bottom = 4)
         val top = LinearLayout(this@MainActivity).apply {
@@ -1019,8 +1022,8 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             background = roundedBackground(palette.surface, palette.border, 18)
-            setPadding(dp(6), dp(9), dp(6), dp(9))
-            layoutParams = matchWrapParams(bottom = 12)
+        setPadding(dp(6), dp(6), dp(6), dp(6))
+        layoutParams = matchWrapParams(bottom = 8)
             items.forEachIndexed { index, item ->
                 val metric = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
@@ -1039,7 +1042,7 @@ class MainActivity : Activity() {
                         textSize = 10f
                     }, matchWrapParams(top = 2))
                 }
-                addView(metric, LinearLayout.LayoutParams(0, dp(52), 1f))
+                addView(metric, LinearLayout.LayoutParams(0, dp(42), 1f))
                 if (index < items.lastIndex) {
                     addView(View(this@MainActivity).apply {
                         setBackgroundColor(color(palette.border))
@@ -1055,75 +1058,33 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         background = roundedBackground(palette.surface, palette.border, 22, palette.surfaceAlt)
         elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
-        setPadding(dp(14), dp(14), dp(14), dp(14))
-        layoutParams = matchWrapParams(bottom = 12)
+        setPadding(dp(10), dp(9), dp(10), dp(10))
+        layoutParams = matchWrapParams(bottom = 8)
 
-        val top = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val titleColumn = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@MainActivity).apply {
-                text = "低速控制"
-                setTextColor(color(palette.textPrimary))
-                textSize = 20f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = "适用于车位与窄通道人工接管"
-                setTextColor(color(palette.textSecondary))
-                textSize = 11f
-            }, matchWrapParams(top = 2))
-        }
-        top.addView(titleColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        top.addView(parkingOutlineButton("底盘") {
-            sendGet(api().startTaskUrl("base"), "启动底盘驱动")
-        }, LinearLayout.LayoutParams(dp(68), dp(42)))
-        top.addView(parkingDangerButton("急停") {
-            currentDirection = null
-            mainHandler.removeCallbacks(repeatMoveRunnable)
-            sendGet(api().emergencyStopUrl(), "急停")
-        }, LinearLayout.LayoutParams(dp(72), dp(42)).apply {
-            setMargins(dp(8), 0, 0, 0)
-        })
-        addView(top)
-
-        txtDriveState = TextView(this@MainActivity).apply {
-            text = "当前动作：$currentMotionLabel"
-            setTextColor(color(palette.accentText))
-            textSize = 15f
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            background = roundedBackground(palette.accentSoft, palette.accent, 16)
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-        }
-        addView(txtDriveState, matchWrapParams(top = 13))
-        addView(parkingSpeedDeck(), matchWrapParams(top = 13))
-        addView(parkingMovementGrid(), matchWrapParams(top = 10))
+        addView(parkingSpeedDeck())
+        addView(parkingMovementGrid(), matchWrapParams(top = 6))
     }
 
     private fun parkingSpeedDeck(): LinearLayout = LinearLayout(this).apply {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
-        addView(parkingSectionTitle("速度限制", "停车场内建议保持慢速或标准档"))
         val presets = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(parkingSpeedButton("慢速", 5), LinearLayout.LayoutParams(0, dp(40), 1f))
-            addView(parkingSpeedButton("标准", 13), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            addView(parkingSpeedButton("慢速", 5), LinearLayout.LayoutParams(0, dp(34), 1f))
+            addView(parkingSpeedButton("标准", 13), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
                 setMargins(dp(7), 0, 0, 0)
             })
-            addView(parkingSpeedButton("快速", 23), LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            addView(parkingSpeedButton("快速", 23), LinearLayout.LayoutParams(0, dp(34), 1f).apply {
                 setMargins(dp(7), 0, 0, 0)
             })
         }
-        addView(presets, matchWrapParams(top = 9))
+        addView(presets)
         txtSpeed = TextView(this@MainActivity).apply {
             setTextColor(color(palette.textPrimary))
             textSize = 12f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         }
-        addView(txtSpeed, matchWrapParams(top = 9))
+        addView(txtSpeed, matchWrapParams(top = 5))
         val speedBar = SeekBar(this@MainActivity).apply {
             max = 30
             progress = speedProgress
@@ -1137,7 +1098,10 @@ class MainActivity : Activity() {
             })
         }
         driveSpeedSeekBar = speedBar
-        addView(speedBar)
+        addView(speedBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(34)
+        ))
     }
 
     private fun parkingSpeedButton(text: String, progress: Int): Button = Button(this).apply {
@@ -1169,9 +1133,9 @@ class MainActivity : Activity() {
         addParkingMoveButton(this, "←\n左移", "left")
         addView(parkingStopButton(), parkingGridParams())
         addParkingMoveButton(this, "→\n右移", "right")
-        addView(Space(this@MainActivity), parkingGridParams())
+        addView(parkingChassisButton(), parkingGridParams())
         addParkingMoveButton(this, "↓\n后退", "back")
-        addView(Space(this@MainActivity), parkingGridParams())
+        addView(parkingEmergencyButton(), parkingGridParams())
     }
 
     private fun addParkingMoveButton(grid: GridLayout, text: String, direction: String) {
@@ -1209,6 +1173,45 @@ class MainActivity : Activity() {
         elevation = dp(InteractionSpec.parkingDriveButtonElevationDp() + 2).toFloat()
         stateListAnimator = null
         setOnClickListener { stopMove() }
+    }
+
+    private fun parkingChassisButton(): Button = Button(this).apply {
+        val palette = parkingPalette()
+        text = "◇\n底盘"
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setLineSpacing(dp(1).toFloat(), 1.0f)
+        setTextColor(color(palette.textPrimary))
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 20)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
+        stateListAnimator = null
+        setOnClickListener { sendGet(api().startTaskUrl("base"), "启动底盘驱动") }
+    }
+
+    private fun parkingEmergencyButton(): Button = Button(this).apply {
+        text = "!\n急停"
+        isAllCaps = false
+        includeFontPadding = false
+        minHeight = 0
+        minimumHeight = 0
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setLineSpacing(dp(1).toFloat(), 1.0f)
+        setTextColor(color(accentOnColor()))
+        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        background = tactileBackground("#B8464F", "#FAD0D5", "#E06A75", 20)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp() + 2).toFloat()
+        stateListAnimator = null
+        setOnClickListener {
+            currentDirection = null
+            mainHandler.removeCallbacks(repeatMoveRunnable)
+            sendGet(api().emergencyStopUrl(), "急停")
+        }
     }
 
     private fun parkingGridParams(): GridLayout.LayoutParams = GridLayout.LayoutParams().apply {

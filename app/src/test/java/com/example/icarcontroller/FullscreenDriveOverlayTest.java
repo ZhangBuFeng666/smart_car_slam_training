@@ -38,6 +38,7 @@ public class FullscreenDriveOverlayTest {
         assertEquals(InteractionSpec.cameraGlassButtonAlpha(), contract.getGlassAlpha(), 0.0001f);
         assertTrue(contract.getPressedAlpha() > contract.getGlassAlpha());
         assertTrue(contract.getFixedTouchSizeDp() >= 48);
+        assertTrue(contract.getFixedTouchSizeDp() <= 58);
         assertTrue(contract.getStopUsesTranslucentRed());
     }
 

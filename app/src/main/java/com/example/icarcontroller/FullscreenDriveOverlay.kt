@@ -124,9 +124,9 @@ fun fullscreenDriveLayoutContract(): FullscreenDriveLayoutContract =
 
 fun fullscreenDriveVisualContract(): FullscreenDriveVisualContract =
     FullscreenDriveVisualContract(
-        glassAlpha = InteractionSpec.cameraGlassButtonAlpha().coerceAtMost(0.18f),
-        pressedAlpha = 0.34f,
-        fixedTouchSizeDp = 64,
+        glassAlpha = InteractionSpec.cameraGlassButtonAlpha().coerceAtMost(0.12f),
+        pressedAlpha = 0.28f,
+        fixedTouchSizeDp = 56,
         stopUsesTranslucentRed = true
     )
 
@@ -275,10 +275,10 @@ class FullscreenDriveOverlay(
             setMargins(dp(14), dp(10), dp(76), 0)
         })
 
-        exitButton = controlButton("X", "Exit fullscreen", isStop = false) { onExit() }
+        exitButton = controlButton("×", "Exit fullscreen", isStop = false) { onExit() }
         addView(exitButton, LayoutParams(
-            dp(52),
-            dp(52),
+            dp(46),
+            dp(46),
             Gravity.TOP or Gravity.END
         ).apply {
             setMargins(0, dp(10), dp(14), 0)
@@ -288,12 +288,13 @@ class FullscreenDriveOverlay(
     private fun addTranslationControls() {
         val size = dp(visualContract.fixedTouchSizeDp)
         translationControls = FrameLayout(context)
-        translationControls.addView(moveControl("^", "front"), clusterParams(size, size, size, 0))
-        translationControls.addView(moveControl("v", "back"), clusterParams(size, size, size, size * 2))
-        translationControls.addView(moveControl("<", "left"), clusterParams(size, size, 0, size))
-        translationControls.addView(moveControl(">", "right"), clusterParams(size, size, size * 2, size))
+        translationControls.addView(moveControl("↑", "front"), clusterParams(size, size, size, 0))
+        translationControls.addView(moveControl("↓", "back"), clusterParams(size, size, size, size * 2))
+        translationControls.addView(moveControl("←", "left"), clusterParams(size, size, 0, size))
+        translationControls.addView(moveControl("→", "right"), clusterParams(size, size, size * 2, size))
+        translationControls.translationY = dp(52).toFloat()
         addView(translationControls, LayoutParams(size * 3, size * 3, Gravity.START or Gravity.CENTER_VERTICAL).apply {
-            marginStart = dp(14)
+            marginStart = dp(18)
         })
     }
 
@@ -301,20 +302,22 @@ class FullscreenDriveOverlay(
         val size = dp(visualContract.fixedTouchSizeDp)
         turningControls = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(moveControl("CCW", "turn_left"), LinearLayout.LayoutParams(size, size))
+            gravity = Gravity.CENTER
+            addView(moveControl("↶", "turn_left"), LinearLayout.LayoutParams(size, size))
             addView(stopControl(), LinearLayout.LayoutParams(size, size).apply {
-                marginStart = dp(8)
+                marginStart = dp(10)
             })
-            addView(moveControl("CW", "turn_right"), LinearLayout.LayoutParams(size, size).apply {
-                marginStart = dp(8)
+            addView(moveControl("↷", "turn_right"), LinearLayout.LayoutParams(size, size).apply {
+                marginStart = dp(10)
             })
         }
+        turningControls.translationY = dp(52).toFloat()
         addView(turningControls, LayoutParams(
-            size * 3 + dp(16),
+            size * 3 + dp(20),
             size,
             Gravity.END or Gravity.CENTER_VERTICAL
         ).apply {
-            marginEnd = dp(14)
+            marginEnd = dp(18)
         })
     }
 
@@ -323,15 +326,15 @@ class FullscreenDriveOverlay(
         speedControl = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            addView(speedLimitText, LinearLayout.LayoutParams(dp(142), dp(30)))
-            addView(speedSeekBar, LinearLayout.LayoutParams(dp(196), dp(30)))
+            addView(speedLimitText, LinearLayout.LayoutParams(dp(128), dp(26)))
+            addView(speedSeekBar, LinearLayout.LayoutParams(dp(180), dp(24)))
         }
         addView(speedControl, LayoutParams(
-            dp(210),
-            dp(62),
+            dp(192),
+            dp(52),
             Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         ).apply {
-            bottomMargin = dp(12)
+            bottomMargin = dp(8)
         })
     }
 
@@ -350,7 +353,7 @@ class FullscreenDriveOverlay(
         }
 
     private fun stopControl(): TextView =
-        controlButton("STOP", "Stop", isStop = true) {
+        controlButton("■", "Stop", isStop = true) {
             onStop()
         }.also { button ->
             installHoldBehavior(button, onDown = {
@@ -368,7 +371,7 @@ class FullscreenDriveOverlay(
         contentDescription = description
         gravity = Gravity.CENTER
         includeFontPadding = false
-        textSize = if (label.length > 2) 11f else 22f
+        textSize = if (label.length > 1) 20f else 27f
         setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         setTextColor(Color.WHITE)
         setShadowLayer(3f, 0f, 1f, Color.BLACK)
@@ -432,7 +435,7 @@ class FullscreenDriveOverlay(
     }
 
     private fun setHoldPressed(view: View, button: TextView, pressed: Boolean) {
-        view.background = glassBackground(button.text == "STOP", pressed)
+        view.background = glassBackground(button.contentDescription == "Stop", pressed)
         view.scaleX = if (pressed) InteractionSpec.pressFeedbackScale() else 1f
         view.scaleY = if (pressed) InteractionSpec.pressFeedbackScale() else 1f
     }
@@ -456,7 +459,7 @@ class FullscreenDriveOverlay(
             turningControls.layoutParams = this
         }
         (speedControl.layoutParams as LayoutParams).apply {
-            bottomMargin = dp(12) + safe.bottom
+            bottomMargin = dp(8) + safe.bottom
             speedControl.layoutParams = this
         }
     }
@@ -503,12 +506,12 @@ class FullscreenDriveOverlay(
     private fun hudText(): TextView = TextView(context).apply {
         gravity = Gravity.CENTER_VERTICAL
         includeFontPadding = false
-        textSize = 11f
+        textSize = 10f
         setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         setTextColor(Color.WHITE)
         setShadowLayer(3f, 0f, 1f, Color.BLACK)
-        setPadding(dp(10), 0, dp(10), 0)
-        background = roundedGlass(Color.WHITE, 0.13f, Color.WHITE, 0.28f)
+        setPadding(dp(8), 0, dp(8), 0)
+        background = roundedGlass(Color.BLACK, 0.10f, Color.WHITE, 0.16f, dp(18).toFloat())
     }
 
     private fun glassBackground(isStop: Boolean, pressed: Boolean): GradientDrawable {
@@ -516,17 +519,18 @@ class FullscreenDriveOverlay(
         val border = if (isStop) Color.rgb(255, 116, 126) else Color.WHITE
         val alpha = if (pressed) visualContract.pressedAlpha else visualContract.glassAlpha
         val borderAlpha = if (pressed) 0.92f else 0.46f
-        return roundedGlass(fill, alpha, border, borderAlpha)
+        return roundedGlass(fill, alpha, border, borderAlpha, dp(28).toFloat())
     }
 
     private fun roundedGlass(
         fillColor: Int,
         fillAlpha: Float,
         borderColor: Int,
-        borderAlpha: Float
+        borderAlpha: Float,
+        radius: Float = dp(8).toFloat()
     ): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(8).toFloat()
+        cornerRadius = radius
         setColor(withAlpha(fillColor, fillAlpha))
         setStroke(dp(1), withAlpha(borderColor, borderAlpha))
     }

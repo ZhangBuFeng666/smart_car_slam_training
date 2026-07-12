@@ -227,7 +227,11 @@ class DriveCameraPanel(
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
-        val height = (width * 9f / 16f).toInt()
+        val height = (
+            width *
+                InteractionSpec.drivePortraitCameraHeightUnits().toFloat() /
+                InteractionSpec.drivePortraitCameraWidthUnits()
+            ).toInt()
         super.onMeasure(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)

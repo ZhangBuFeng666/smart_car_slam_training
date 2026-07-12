@@ -7,6 +7,7 @@ import java.lang.reflect.Method;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
@@ -142,6 +143,33 @@ public class InteractionSpecTest {
         guard.beginReparent();
         guard.endReparent();
         assertTrue(guard.shouldReleaseOnDetach());
+    }
+
+    @Test
+    public void latestValueCoalescerKeepsOnlyTheNewestPendingValue() {
+        LatestValueCoalescer<String> coalescer = new LatestValueCoalescer<>();
+
+        LatestValueOffer<String> first = coalescer.offer("first");
+        assertTrue(first.getShouldScheduleDrain());
+        assertNull(first.getReplaced());
+
+        LatestValueOffer<String> second = coalescer.offer("second");
+        assertFalse(second.getShouldScheduleDrain());
+        assertEquals("first", second.getReplaced());
+        assertEquals("second", coalescer.drain());
+
+        assertTrue(coalescer.offer("third").getShouldScheduleDrain());
+    }
+
+    @Test
+    public void latestValueCoalescerClearKeepsQueuedDrainHarmlessAndReusable() {
+        LatestValueCoalescer<String> coalescer = new LatestValueCoalescer<>();
+
+        assertTrue(coalescer.offer("first").getShouldScheduleDrain());
+        assertEquals("first", coalescer.clear());
+        assertFalse(coalescer.offer("second").getShouldScheduleDrain());
+        assertEquals("second", coalescer.drain());
+        assertNull(coalescer.drain());
     }
 
     private Object requiredSpec(String methodName) {

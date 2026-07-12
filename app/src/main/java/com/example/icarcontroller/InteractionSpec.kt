@@ -355,3 +355,37 @@ class CameraReparentGuard {
         return shouldRelease
     }
 }
+
+data class LatestValueOffer<T : Any>(
+    val replaced: T?,
+    val shouldScheduleDrain: Boolean
+)
+
+class LatestValueCoalescer<T : Any> {
+    private val lock = Any()
+    private var pending: T? = null
+    private var drainScheduled = false
+
+    fun offer(value: T): LatestValueOffer<T> = synchronized(lock) {
+        val replaced = pending
+        pending = value
+        val shouldSchedule = !drainScheduled
+        if (shouldSchedule) {
+            drainScheduled = true
+        }
+        LatestValueOffer(replaced, shouldSchedule)
+    }
+
+    fun drain(): T? = synchronized(lock) {
+        val value = pending
+        pending = null
+        drainScheduled = false
+        value
+    }
+
+    fun clear(): T? = synchronized(lock) {
+        val value = pending
+        pending = null
+        value
+    }
+}

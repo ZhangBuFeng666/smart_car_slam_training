@@ -52,6 +52,8 @@ class MjpegStreamView @JvmOverloads constructor(
     private val destination = RectF()
     private val reconnectDelaysMillis = InteractionSpec.cameraReconnectDelaysMillis()
     private val reparentGuard = CameraReparentGuard()
+    private val pendingBitmaps = LatestValueCoalescer<PendingBitmap>()
+    private val bitmapDrainRunnable = Runnable(::drainPendingBitmap)
 
     private var displayedBitmap: Bitmap? = null
     private var active = false
@@ -314,30 +316,44 @@ class MjpegStreamView @JvmOverloads constructor(
     }
 
     private fun publishBitmap(currentGeneration: Long, bitmap: Bitmap): Boolean {
-        if (!isCurrent(currentGeneration)) {
+        val offer = synchronized(stateLock) {
+            if (!isCurrentLocked(currentGeneration)) {
+                null
+            } else {
+                pendingBitmaps.offer(PendingBitmap(currentGeneration, bitmap))
+            }
+        }
+        if (offer == null) {
             bitmap.recycle()
             return false
         }
-        mainHandler.post {
-            if (!isCurrent(currentGeneration)) {
-                bitmap.recycle()
-                return@post
-            }
-            val previous = displayedBitmap
-            displayedBitmap = bitmap
-            previous?.recycle()
-            postInvalidateOnAnimation()
+        offer.replaced?.bitmap?.recycle()
+        if (offer.shouldScheduleDrain) {
+            mainHandler.post(bitmapDrainRunnable)
         }
         return true
     }
 
     private fun clearBitmapOnMain() {
+        pendingBitmaps.clear()?.bitmap?.recycle()
         runOnMain {
             val previous = displayedBitmap
             displayedBitmap = null
             previous?.recycle()
             invalidate()
         }
+    }
+
+    private fun drainPendingBitmap() {
+        val pending = pendingBitmaps.drain() ?: return
+        if (!isCurrent(pending.generation)) {
+            pending.bitmap.recycle()
+            return
+        }
+        val previous = displayedBitmap
+        displayedBitmap = pending.bitmap
+        previous?.recycle()
+        postInvalidateOnAnimation()
     }
 
     private fun scheduleRetry(currentGeneration: Long, retryIndex: Int) {
@@ -433,6 +449,11 @@ class MjpegStreamView @JvmOverloads constructor(
             executor?.shutdownNow()
         }
     }
+
+    private data class PendingBitmap(
+        val generation: Long,
+        val bitmap: Bitmap
+    )
 
     private companion object {
         const val CONNECT_TIMEOUT_MILLIS = 2_000

@@ -94,11 +94,9 @@ class JarvisChatPage(
             textSize = 11f
             maxLines = 1
         }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-        addView(TextView(context).apply {
-            text = "安全确认"
-            setTextColor(color(palette.accentText))
-            textSize = 10f
-        })
+        addView(iconButton("⚙") {
+            tokenInput.visibility = if (tokenInput.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }, LayoutParams(dp(34), dp(34)))
     }
 
     private fun composer(): LinearLayout = LinearLayout(context).apply {
@@ -112,18 +110,6 @@ class JarvisChatPage(
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(input, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-            addView(iconButton("⚙") {
-                tokenInput.visibility = if (tokenInput.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            }, LayoutParams(dp(38), dp(38)).apply {
-                setMargins(dp(6), 0, 0, 0)
-            })
-            addView(iconButton("!") {
-                onEmergencyStop()
-                state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded("已发送急停指令。"))
-                render()
-            }, LayoutParams(dp(38), dp(38)).apply {
-                setMargins(dp(6), 0, 0, 0)
-            })
             addView(primaryButton("发送") { sendMessage() }, LayoutParams(dp(58), dp(38)).apply {
                 setMargins(dp(6), 0, 0, 0)
             })

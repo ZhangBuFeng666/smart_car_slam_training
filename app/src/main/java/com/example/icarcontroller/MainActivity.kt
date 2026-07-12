@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
@@ -130,14 +131,13 @@ class MainActivity : Activity() {
         scrollContent.isVerticalScrollBarEnabled = false
         topBar = findViewById(R.id.topBar)
         bottomNav = findViewById(R.id.bottomNav)
-        findViewById<View>(android.R.id.content).setOnApplyWindowInsetsListener { _, insets ->
-            val keyboardVisible = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                insets.isVisible(WindowInsets.Type.ime())
-            } else {
-                false
-            }
+        val activityRoot = findViewById<View>(android.R.id.content)
+        activityRoot.viewTreeObserver.addOnGlobalLayoutListener {
+            val visibleFrame = Rect()
+            activityRoot.getWindowVisibleDisplayFrame(visibleFrame)
+            val keyboardHeight = activityRoot.rootView.height - visibleFrame.bottom
+            val keyboardVisible = keyboardHeight > activityRoot.rootView.height * 0.15f
             bottomNav.visibility = if (selectedPage == "ai" && keyboardVisible) View.GONE else View.VISIBLE
-            insets
         }
         txtAppTitle = findViewById(R.id.txtAppTitle)
         txtStatusPill = findViewById(R.id.txtStatusPill)

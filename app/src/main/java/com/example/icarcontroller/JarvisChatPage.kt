@@ -30,7 +30,11 @@ class JarvisChatPage(
     private var token = credentials.loadToken()
     private var missionId: String? = null
     private var currentPlan: JarvisMissionPlan? = null
-    private var state = JarvisViewState.initial()
+    private var state = JarvisViewState.initial().copy(
+        chatItems = listOf(
+            JarvisChatItem.AssistantMessage("你好，我是贾维斯，有什么吩咐？", "")
+        )
+    )
 
     private val chatList = LinearLayout(context).apply {
         orientation = VERTICAL
@@ -59,6 +63,15 @@ class JarvisChatPage(
     init {
         orientation = VERTICAL
         setPadding(0, 0, 0, 0)
+        addView(TextView(context).apply {
+            text = "贾维斯"
+            setTextColor(color(palette.textPrimary))
+            textSize = 20f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            gravity = Gravity.CENTER
+        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+            setMargins(0, dp(8), 0, dp(8))
+        })
         addView(ScrollView(context).apply {
             isFillViewport = true
             addView(chatList)

@@ -236,6 +236,14 @@ class CameraCaptureService:
 
     def _shutdown_capture(self):
         with self._condition:
+            if self._reaper_thread is not None and self._reaper_thread.is_alive():
+                self._generation += 1
+                self._stop_requested = True
+                self._state = "stopping"
+                self._error = "camera capture thread is still stopping"
+                self._clear_frame_visibility_locked()
+                self._condition.notify_all()
+                return False
             self._generation += 1
             self._stop_requested = True
             thread = self._thread

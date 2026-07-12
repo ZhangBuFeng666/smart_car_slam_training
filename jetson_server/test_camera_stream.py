@@ -657,6 +657,39 @@ class CameraCaptureServiceTest(unittest.TestCase):
         self.wait_for_state(service, "busy", timeout=1.0)
         self.assertEqual(2, len(captures))
 
+    def test_repeated_restart_waits_for_existing_release_reaper(self):
+        first_capture = BlockingReleaseCapture()
+        captures = []
+
+        def capture_factory(path):
+            capture = first_capture if not captures else FakeCapture(
+                opened=True, reads=[(False, None)]
+            )
+            captures.append(capture)
+            return capture
+
+        service = self.make_service(capture_factory=capture_factory)
+        service.acquire_client()
+        self.assertTrue(first_capture.read_started.wait(0.5))
+
+        service.restart()
+        self.assertEqual("stopping", service.status()["state"])
+        first_capture.allow_read_to_finish.set()
+        with service._condition:
+            old_thread = service._thread
+        old_thread.join(0.5)
+
+        started_at = time.monotonic()
+        service.restart()
+        second_restart_elapsed = time.monotonic() - started_at
+
+        self.assertLess(second_restart_elapsed, 0.2)
+        self.assertEqual("stopping", service.status()["state"])
+        self.assertEqual(1, len(captures))
+        first_capture.allow_release_to_finish.set()
+        self.wait_for_state(service, "busy", timeout=1.0)
+        self.assertEqual(2, len(captures))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from jarvis_agent.models import (
     DecisionRequest,
+    DecisionType,
     MissionPlan,
     MissionState,
     MissionView,
@@ -27,7 +28,7 @@ class PersistedVisionEvent:
 class DecisionRecord:
     id: str
     mission_id: str
-    decision: str
+    decision: DecisionType
     event_id: Optional[str]
     note: Optional[str]
     created_at: datetime
@@ -272,12 +273,34 @@ class Repository:
                     record.id,
                     record.mission_id,
                     record.event_id,
-                    record.decision,
+                    record.decision.value,
                     record.note,
                     _format_dt(record.created_at),
                 ),
             )
         return record
+
+    def list_decisions(self, mission_id: str) -> List[DecisionRecord]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select * from decisions
+                where mission_id = ?
+                order by created_at asc, rowid asc
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [
+            DecisionRecord(
+                id=row["id"],
+                mission_id=row["mission_id"],
+                decision=DecisionType(row["decision"]),
+                event_id=row["event_id"],
+                note=row["note"],
+                created_at=_parse_dt(row["created_at"]),
+            )
+            for row in rows
+        ]
 
     def save_report(self, mission_id: str, markdown: str) -> ReportView:
         report = ReportView(

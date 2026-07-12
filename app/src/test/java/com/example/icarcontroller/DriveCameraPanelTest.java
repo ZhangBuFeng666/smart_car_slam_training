@@ -52,6 +52,27 @@ public class DriveCameraPanelTest {
         assertEquals(Arrays.asList("beginReparent", "removeView"), calls);
     }
 
+    @Test
+    public void snapshotRelayExposesCurrentStateAndForwardsWithoutRestartingStream() {
+        CameraSnapshotRelay relay = new CameraSnapshotRelay(
+                new CameraViewSnapshot(CameraViewState.IDLE, 0, null)
+        );
+        List<CameraViewSnapshot> observed = new ArrayList<>();
+
+        relay.setObserver(snapshot -> {
+            observed.add(snapshot);
+            return Unit.INSTANCE;
+        });
+        CameraViewSnapshot live = new CameraViewSnapshot(CameraViewState.LIVE, 21, null);
+        relay.publish(live);
+
+        assertEquals(live, relay.currentSnapshot());
+        assertEquals(Arrays.asList(
+                new CameraViewSnapshot(CameraViewState.IDLE, 0, null),
+                live
+        ), observed);
+    }
+
     private static void assertPresentation(
             CameraViewState state,
             int fps,

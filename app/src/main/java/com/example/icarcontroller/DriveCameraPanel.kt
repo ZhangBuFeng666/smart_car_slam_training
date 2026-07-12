@@ -38,6 +38,23 @@ fun performControlledReparent(beginReparent: () -> Unit, removeView: () -> Unit)
     removeView()
 }
 
+class CameraSnapshotRelay(initialSnapshot: CameraViewSnapshot) {
+    private var snapshot = initialSnapshot
+    private var observer: ((CameraViewSnapshot) -> Unit)? = null
+
+    fun currentSnapshot(): CameraViewSnapshot = snapshot
+
+    fun setObserver(observer: ((CameraViewSnapshot) -> Unit)?) {
+        this.observer = observer
+        observer?.invoke(snapshot)
+    }
+
+    fun publish(snapshot: CameraViewSnapshot) {
+        this.snapshot = snapshot
+        observer?.invoke(snapshot)
+    }
+}
+
 fun cameraStatePresentation(snapshot: CameraViewSnapshot): CameraPresentation = when (snapshot.state) {
     CameraViewState.CONNECTING -> CameraPresentation("正在连接", false)
     CameraViewState.LIVE -> CameraPresentation("实时 · ${snapshot.fps} FPS", false)
@@ -55,6 +72,7 @@ class DriveCameraPanel(
     private var streamUrl: String? = null
     private var streamRequested = false
     private var onFullscreenRequested: (() -> Unit)? = null
+    private val snapshotRelay = CameraSnapshotRelay(CameraViewSnapshot(CameraViewState.IDLE))
 
     private val statusChip = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -169,6 +187,7 @@ class DriveCameraPanel(
         streamUrl = null
         streamView.release()
         render(CameraViewSnapshot(CameraViewState.IDLE))
+        snapshotRelay.setObserver(null)
     }
 
     fun reconnect() {
@@ -200,6 +219,12 @@ class DriveCameraPanel(
         fullscreenButton.visibility = if (callback == null) View.GONE else View.VISIBLE
     }
 
+    fun currentSnapshot(): CameraViewSnapshot = snapshotRelay.currentSnapshot()
+
+    fun setSnapshotObserver(observer: ((CameraViewSnapshot) -> Unit)?) {
+        snapshotRelay.setObserver(observer)
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
         val height = (width * 9f / 16f).toInt()
@@ -210,6 +235,7 @@ class DriveCameraPanel(
     }
 
     private fun render(snapshot: CameraViewSnapshot) {
+        snapshotRelay.publish(snapshot)
         val presentation = cameraStatePresentation(snapshot)
         statusChip.text = presentation.text
         errorMessage.text = presentation.text

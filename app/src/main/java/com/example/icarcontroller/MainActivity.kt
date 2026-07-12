@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
@@ -51,6 +52,14 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+private data class FullscreenAccessibilityState(
+    val view: View,
+    val importantForAccessibility: Int,
+    val isFocusable: Boolean,
+    val isFocusableInTouchMode: Boolean,
+    val descendantFocusability: Int?
+)
+
 class MainActivity : Activity() {
     private lateinit var pageContent: LinearLayout
     private lateinit var scrollContent: ScrollView
@@ -71,6 +80,9 @@ class MainActivity : Activity() {
     private var parkingVisionView: ParkingVisionView? = null
     private var driveCameraPanel: DriveCameraPanel? = null
     private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
+    private var fullscreenDrivePending = false
+    private var fullscreenAccessibilityState: List<FullscreenAccessibilityState>? = null
+    private var driveSpeedSeekBar: SeekBar? = null
     private var homeConnectionText: TextView? = null
     private var pageStatusText: TextView? = null
 
@@ -185,6 +197,7 @@ class MainActivity : Activity() {
         txtSpeed = null
         txtDriveState = null
         txtLog = null
+        driveSpeedSeekBar = null
         vehicleStage?.destroy()
         vehicleStage = null
         parkingVisionView = null
@@ -216,10 +229,24 @@ class MainActivity : Activity() {
     }
 
     private fun enterFullscreenDrive() {
-        if (fullscreenDriveOverlay != null) return
-        val panel = driveCameraPanel ?: return
+        if (fullscreenDriveOverlay != null || fullscreenDrivePending) return
+        if (driveCameraPanel == null) return
 
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            showFullscreenDriveOverlay()
+        } else {
+            fullscreenDrivePending = true
+        }
+    }
+
+    private fun showFullscreenDriveOverlay() {
+        if (
+            fullscreenDriveOverlay != null ||
+            resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+        ) return
+        val panel = driveCameraPanel ?: return
+
         val overlay = FullscreenDriveOverlay(
             context = this,
             streamView = panel.streamViewForReparent(),
@@ -228,11 +255,17 @@ class MainActivity : Activity() {
             isDirectionActive = { direction -> currentDirection == direction },
             onStop = ::stopMove,
             onExit = { exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE) },
-            initialSpeed = currentSpeed(),
-            initialTurn = currentTurn(),
+            onSpeedProgressChanged = { progress ->
+                speedProgress = fullscreenSpeedSelection(progress).progress
+                updateSpeedText()
+            },
+            initialSpeedProgress = speedProgress,
+            initialSnapshot = panel.currentSnapshot(),
             initialMotion = currentMotionLabel
         )
+        fullscreenDrivePending = false
         fullscreenDriveOverlay = overlay
+        hideUnderlyingAccessibility()
         (window.decorView as ViewGroup).addView(
             overlay,
             ViewGroup.LayoutParams(
@@ -240,16 +273,26 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        panel.setSnapshotObserver(overlay::updateCameraSnapshot)
         hideDriveSystemUi()
         overlay.requestFocus()
     }
 
     private fun exitFullscreenDrive(event: DriveExitEvent) {
-        val overlay = fullscreenDriveOverlay ?: return
+        val wasPending = fullscreenDrivePending
+        fullscreenDrivePending = false
+        val overlay = fullscreenDriveOverlay
+        if (overlay == null) {
+            if (wasPending) {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+            return
+        }
         forceStopForExit(event)
 
         val panel = driveCameraPanel
         if (panel != null) {
+            panel.setSnapshotObserver(null)
             panel.restoreStreamView(overlay.streamView)
         } else {
             overlay.streamView.beginReparent()
@@ -257,6 +300,7 @@ class MainActivity : Activity() {
         }
         (overlay.parent as? ViewGroup)?.removeView(overlay)
         fullscreenDriveOverlay = null
+        restoreUnderlyingAccessibility()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         showDriveSystemUi()
     }
@@ -291,8 +335,39 @@ class MainActivity : Activity() {
         updateChrome(selectedPage)
     }
 
+    private fun hideUnderlyingAccessibility() {
+        val views = listOf<View>(topBar, pageContent, bottomNav)
+        fullscreenAccessibilityState = views.map { view ->
+            FullscreenAccessibilityState(
+                view = view,
+                importantForAccessibility = view.importantForAccessibility,
+                isFocusable = view.isFocusable,
+                isFocusableInTouchMode = view.isFocusableInTouchMode,
+                descendantFocusability = (view as? ViewGroup)?.descendantFocusability
+            )
+        }
+        views.forEach { view ->
+            view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            view.isFocusable = false
+            view.isFocusableInTouchMode = false
+            (view as? ViewGroup)?.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+    }
+
+    private fun restoreUnderlyingAccessibility() {
+        fullscreenAccessibilityState?.forEach { state ->
+            state.view.importantForAccessibility = state.importantForAccessibility
+            state.view.isFocusable = state.isFocusable
+            state.view.isFocusableInTouchMode = state.isFocusableInTouchMode
+            state.descendantFocusability?.let { value ->
+                (state.view as? ViewGroup)?.descendantFocusability = value
+            }
+        }
+        fullscreenAccessibilityState = null
+    }
+
     override fun onBackPressed() {
-        if (fullscreenDriveOverlay != null) {
+        if (fullscreenDriveOverlay != null || fullscreenDrivePending) {
             exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         } else {
             super.onBackPressed()
@@ -301,6 +376,10 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (fullscreenDrivePending && newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            showFullscreenDriveOverlay()
+            return
+        }
         if (
             fullscreenDriveOverlay != null &&
             newConfig.orientation != Configuration.ORIENTATION_LANDSCAPE
@@ -1045,18 +1124,20 @@ class MainActivity : Activity() {
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         }
         addView(txtSpeed, matchWrapParams(top = 9))
-        addView(SeekBar(this@MainActivity).apply {
+        val speedBar = SeekBar(this@MainActivity).apply {
             max = 30
             progress = speedProgress
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    speedProgress = progress
+                    speedProgress = fullscreenSpeedSelection(progress).progress
                     updateSpeedText()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             })
-        })
+        }
+        driveSpeedSeekBar = speedBar
+        addView(speedBar)
     }
 
     private fun parkingSpeedButton(text: String, progress: Int): Button = Button(this).apply {
@@ -2690,6 +2771,7 @@ class MainActivity : Activity() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupHoldButton(button: Button, direction: String) {
+        val tracker = HoldGestureTracker()
         button.isFocusable = true
         button.contentDescription = "${directionLabel(direction).removeSuffix("中")}，按住持续移动"
         button.setOnClickListener {
@@ -2700,26 +2782,50 @@ class MainActivity : Activity() {
             }, 320L)
         }
         button.setOnTouchListener { view, event ->
+            fun setPressed(pressed: Boolean) {
+                view.animate()
+                    .scaleX(if (pressed) InteractionSpec.pressFeedbackScale() else 1f)
+                    .scaleY(if (pressed) InteractionSpec.pressFeedbackScale() else 1f)
+                    .alpha(if (pressed) 0.86f else 1f)
+                    .setDuration(if (pressed) 90 else 180)
+                    .apply {
+                        if (!pressed) setInterpolator(OvershootInterpolator())
+                    }
+                    .start()
+            }
+
+            fun handle(action: HoldGestureAction) {
+                if (action != HoldGestureAction.STOP) return
+                setPressed(false)
+                stopMove()
+            }
+
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    view.animate()
-                        .scaleX(InteractionSpec.pressFeedbackScale())
-                        .scaleY(InteractionSpec.pressFeedbackScale())
-                        .alpha(0.86f)
-                        .setDuration(90)
-                        .start()
-                    startMove(direction)
+                    if (tracker.onDown(event.getPointerId(event.actionIndex)) == HoldGestureAction.START) {
+                        setPressed(true)
+                        startMove(direction)
+                    }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    view.animate()
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .alpha(1f)
-                        .setDuration(180)
-                        .setInterpolator(OvershootInterpolator())
-                        .start()
-                    stopMove()
+                MotionEvent.ACTION_POINTER_UP -> {
+                    handle(tracker.onPointerUp(event.getPointerId(event.actionIndex)))
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val pointerIndex = tracker.activePointerId()?.let(event::findPointerIndex) ?: -1
+                    val inside = pointerIndex >= 0 &&
+                        event.getX(pointerIndex) >= 0f && event.getX(pointerIndex) < view.width.toFloat() &&
+                        event.getY(pointerIndex) >= 0f && event.getY(pointerIndex) < view.height.toFloat()
+                    handle(tracker.onMove(pointerIndex >= 0, inside))
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    handle(tracker.onUp())
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handle(tracker.onCancel())
                     true
                 }
                 else -> true
@@ -2751,6 +2857,9 @@ class MainActivity : Activity() {
                 executorService = when (lane) {
                     StopDispatchLane.URGENT -> stopExecutor
                     StopDispatchLane.MOVE_BARRIER -> moveExecutor
+                },
+                onLatencyMillis = { latency ->
+                    fullscreenDriveOverlay?.updateControlLatency(latency)
                 }
             )
         }
@@ -2777,7 +2886,10 @@ class MainActivity : Activity() {
             label = "移动 $direction",
             quiet = true,
             executorService = moveExecutor,
-            onFinished = { moveGate.finish() }
+            onFinished = { moveGate.finish() },
+            onLatencyMillis = { latency ->
+                fullscreenDriveOverlay?.updateControlLatency(latency)
+            }
         )
     }
 
@@ -2786,13 +2898,19 @@ class MainActivity : Activity() {
         label: String,
         quiet: Boolean = false,
         executorService: ExecutorService = commandExecutor,
-        onFinished: () -> Unit = {}
+        onFinished: () -> Unit = {},
+        onLatencyMillis: ((Long) -> Unit)? = null
     ) {
         if (!quiet) {
             setStatus("$label 请求中")
         }
 
         executorService.execute {
+            val latencyMeasurement = onLatencyMillis?.let { callback ->
+                RequestLatencyMeasurement(SystemClock.elapsedRealtime()) { latency ->
+                    runOnUiThread { callback(latency) }
+                }
+            }
             val result = runCatching {
                 val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
@@ -2809,6 +2927,7 @@ class MainActivity : Activity() {
             }.getOrElse { error ->
                 "失败：${error.message ?: error.javaClass.simpleName}"
             }
+            latencyMeasurement?.complete(SystemClock.elapsedRealtime())
 
             runOnUiThread {
                 if (!quiet) {
@@ -2835,15 +2954,16 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun currentSpeed(): Double =
-        (0.05 + speedProgress / 100.0).coerceIn(0.05, 0.35)
+    private fun currentSpeed(): Double = fullscreenSpeedSelection(speedProgress).speed
 
-    private fun currentTurn(): Double =
-        (0.45 + currentSpeed() * 2.0).coerceIn(0.55, 1.15)
+    private fun currentTurn(): Double = fullscreenSpeedSelection(speedProgress).turn
 
     private fun updateSpeedText() {
         txtSpeed?.text = String.format(Locale.US, "速度 %.2f m/s，转向 %.2f rad/s", currentSpeed(), currentTurn())
-        fullscreenDriveOverlay?.updateSpeed(currentSpeed(), currentTurn())
+        if (driveSpeedSeekBar?.progress != speedProgress) {
+            driveSpeedSeekBar?.progress = speedProgress
+        }
+        fullscreenDriveOverlay?.updateSpeedProgress(speedProgress)
     }
 
     private fun updateDriveState() {

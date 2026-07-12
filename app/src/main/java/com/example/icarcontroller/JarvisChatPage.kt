@@ -1,4 +1,4 @@
-package com.example.icarcontroller
+﻿package com.example.icarcontroller
 
 import android.app.Activity
 import android.content.Context
@@ -33,7 +33,7 @@ class JarvisChatPage(
     private var state = JarvisViewState.initial().copy(
         chatItems = listOf(
             JarvisChatItem.AssistantMessage(
-                "贾维斯已就绪。告诉我巡检目标，我会先生成安全计划，确认后再控制小车执行。",
+                "贾维斯已就绪。请输入巡检目标。",
                 ""
             )
         )
@@ -44,7 +44,7 @@ class JarvisChatPage(
         setPadding(0, dp(4), 0, dp(4))
     }
     private val input = EditText(context).apply {
-        hint = "告诉贾维斯要巡检哪里..."
+        hint = "输入巡检目标..."
         minLines = 1
         maxLines = 4
         setTextColor(color(palette.textPrimary))
@@ -65,85 +65,68 @@ class JarvisChatPage(
 
     init {
         orientation = VERTICAL
-        setPadding(0, 0, 0, dp(8))
+        setPadding(0, 0, 0, 0)
         addView(statusBar(), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, 0, 0, dp(10))
+            setMargins(0, 0, 0, dp(6))
         })
         addView(ScrollView(context).apply {
             addView(chatList)
-        }, LayoutParams(LayoutParams.MATCH_PARENT, dp(380)))
+        }, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         addView(composer(), LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, dp(10), 0, 0)
+            setMargins(0, dp(6), 0, 0)
         })
         render()
     }
 
     private fun statusBar(): LinearLayout = LinearLayout(context).apply {
-        orientation = VERTICAL
-        background = rounded(palette.surface, palette.border, 20)
-        setPadding(dp(14), dp(12), dp(14), dp(12))
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), dp(2), dp(4), dp(2))
         addView(TextView(context).apply {
-            text = "JARVIS"
+            text = "Jarvis"
             setTextColor(color(palette.textPrimary))
-            textSize = 18f
-            letterSpacing = 0.12f
+            textSize = 13f
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         })
         addView(TextView(context).apply {
-            text = "Jetson $host:8100 · ${if (token.isBlank()) "Token 未配置" else "Token 已配置"} · 控制服务 8000 由 Jarvis 接管"
+            text = " · $host:8100 · ${if (token.isBlank()) "Token 未配置" else "Token 已配置"}"
             setTextColor(color(palette.textSecondary))
             textSize = 11f
-        })
-        addView(LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            addView(chip("AGENT 8100", palette.accentText))
-            addView(chip("SAFE CONFIRM", successAccent()), LayoutParams(
-                LayoutParams.WRAP_CONTENT,
-                LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(dp(8), 0, 0, 0) })
-            addView(chip("CAR API 8000", warningAccent()), LayoutParams(
-                LayoutParams.WRAP_CONTENT,
-                LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(dp(8), 0, 0, 0) })
-        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, dp(10), 0, 0)
+            maxLines = 1
+        }, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        addView(TextView(context).apply {
+            text = "安全确认"
+            setTextColor(color(palette.accentText))
+            textSize = 10f
         })
     }
 
     private fun composer(): LinearLayout = LinearLayout(context).apply {
         orientation = VERTICAL
-        background = rounded(palette.surface, palette.border, 20)
-        setPadding(dp(12), dp(12), dp(12), dp(12))
+        setPadding(0, dp(4), 0, 0)
+        tokenInput.visibility = View.GONE
         addView(tokenInput, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
             setMargins(0, 0, 0, dp(8))
         })
         addView(LinearLayout(context).apply {
             orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             addView(input, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-            addView(primaryButton(JarvisUiSpec.primaryActions()[0]) { sendMessage() }, LayoutParams(dp(88), dp(48)).apply {
-                setMargins(dp(8), 0, 0, 0)
+            addView(iconButton("⚙") {
+                tokenInput.visibility = if (tokenInput.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            }, LayoutParams(dp(38), dp(38)).apply {
+                setMargins(dp(6), 0, 0, 0)
             })
-        })
-        addView(HorizontalScrollView(context).apply {
-            isHorizontalScrollBarEnabled = false
-            val row = LinearLayout(context).apply {
-                orientation = HORIZONTAL
-                JarvisUiSpec.quickPrompts().forEach { prompt ->
-                    addView(promptChip(prompt), LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, dp(8), 0)
-                    })
-                }
-            }
-            addView(row)
-        }, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, dp(10), 0, 0)
-        })
-        addView(outlineButton(JarvisUiSpec.dangerAction()) {
-            onEmergencyStop()
-            state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded("已发送急停指令。"))
-            render()
-        }, LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply {
-            setMargins(0, dp(10), 0, 0)
+            addView(iconButton("!") {
+                onEmergencyStop()
+                state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded("已发送急停指令。"))
+                render()
+            }, LayoutParams(dp(38), dp(38)).apply {
+                setMargins(dp(6), 0, 0, 0)
+            })
+            addView(primaryButton("发送") { sendMessage() }, LayoutParams(dp(58), dp(38)).apply {
+                setMargins(dp(6), 0, 0, 0)
+            })
         })
     }
 
@@ -155,7 +138,7 @@ class JarvisChatPage(
         setPadding(dp(10), dp(7), dp(10), dp(7))
         isClickable = true
         setOnClickListener {
-            if (prompt == "生成报告") requestReport(missionId) else {
+            if (prompt == "鐢熸垚鎶ュ憡") requestReport(missionId) else {
                 input.setText(prompt)
                 input.setSelection(input.text.length)
             }
@@ -184,7 +167,7 @@ class JarvisChatPage(
         if (message.isBlank()) return
         val savedToken = saveToken()
         if (savedToken.isBlank()) {
-            appendError("请先配置 Jarvis Token")
+            appendError("璇峰厛閰嶇疆 Jarvis Token")
             return
         }
         input.text.clear()
@@ -352,7 +335,7 @@ class JarvisChatPage(
 
     private fun reportCard(report: JarvisReport): LinearLayout = card("巡检报告", report.createdAt, warningAccent()).apply {
         addView(body(report.markdown.lineSequence().take(5).joinToString("\n")), lp(top = 8))
-        addView(primaryButton("查看完整报告") {
+        addView(primaryButton("鏌ョ湅瀹屾暣鎶ュ憡") {
             state = JarvisReducer.reduce(state, JarvisEvent.SystemMessageAdded(report.markdown))
             render()
         }, LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply { setMargins(0, dp(12), 0, 0) })
@@ -448,6 +431,15 @@ class JarvisChatPage(
         setTextColor(color(palette.textPrimary))
         textSize = 12f
         background = rounded(palette.surfaceAlt, palette.border, 16)
+        setOnClickListener { action() }
+    }
+
+    private fun iconButton(textValue: String, action: () -> Unit): Button = Button(context).apply {
+        text = textValue
+        setTextColor(color(palette.accentText))
+        textSize = 15f
+        background = rounded(palette.surfaceAlt, palette.border, 14)
+        setPadding(0, 0, 0, 0)
         setOnClickListener { action() }
     }
 

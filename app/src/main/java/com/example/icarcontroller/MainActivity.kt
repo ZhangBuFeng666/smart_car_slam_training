@@ -3,6 +3,8 @@ package com.example.icarcontroller
 import android.app.Activity
 import android.app.Dialog
 import android.annotation.SuppressLint
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
@@ -24,6 +26,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
@@ -66,6 +70,7 @@ class MainActivity : Activity() {
     private var vehicleStage: Vehicle3DStageView? = null
     private var parkingVisionView: ParkingVisionView? = null
     private var driveCameraPanel: DriveCameraPanel? = null
+    private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
     private var homeConnectionText: TextView? = null
     private var pageStatusText: TextView? = null
 
@@ -140,6 +145,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         releaseDriveCameraPanel()
         vehicleStage?.destroy()
         vehicleStage = null
@@ -160,6 +166,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         forceStopForExit(DriveExitEvent.APP_PAUSE)
         driveCameraPanel?.stop()
         vehicleStage?.onHostPause()
@@ -168,6 +175,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderPage(key: String) {
+        exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
         releaseDriveCameraPanel()
         saveConnectionInputs()
@@ -207,6 +215,100 @@ class MainActivity : Activity() {
         driveCameraPanel = null
     }
 
+    private fun enterFullscreenDrive() {
+        if (fullscreenDriveOverlay != null) return
+        val panel = driveCameraPanel ?: return
+
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        val overlay = FullscreenDriveOverlay(
+            context = this,
+            streamView = panel.streamViewForReparent(),
+            directionLabel = ::directionLabel,
+            onMoveStart = ::startMove,
+            isDirectionActive = { direction -> currentDirection == direction },
+            onStop = ::stopMove,
+            onExit = { exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE) },
+            initialSpeed = currentSpeed(),
+            initialTurn = currentTurn(),
+            initialMotion = currentMotionLabel
+        )
+        fullscreenDriveOverlay = overlay
+        (window.decorView as ViewGroup).addView(
+            overlay,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        hideDriveSystemUi()
+        overlay.requestFocus()
+    }
+
+    private fun exitFullscreenDrive(event: DriveExitEvent) {
+        val overlay = fullscreenDriveOverlay ?: return
+        forceStopForExit(event)
+
+        val panel = driveCameraPanel
+        if (panel != null) {
+            panel.restoreStreamView(overlay.streamView)
+        } else {
+            overlay.streamView.beginReparent()
+            overlay.removeView(overlay.streamView)
+        }
+        (overlay.parent as? ViewGroup)?.removeView(overlay)
+        fullscreenDriveOverlay = null
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        showDriveSystemUi()
+    }
+
+    private fun hideDriveSystemUi() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.apply {
+                hide(WindowInsets.Type.systemBars())
+                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                )
+        }
+    }
+
+    private fun showDriveSystemUi() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.show(WindowInsets.Type.systemBars())
+        }
+        @Suppress("DEPRECATION")
+        run {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+        updateChrome(selectedPage)
+    }
+
+    override fun onBackPressed() {
+        if (fullscreenDriveOverlay != null) {
+            exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (
+            fullscreenDriveOverlay != null &&
+            newConfig.orientation != Configuration.ORIENTATION_LANDSCAPE
+        ) {
+            exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
+        }
+    }
+
     private fun renderHome() {
         pageContent.addView(digitalKeyStage())
     }
@@ -220,6 +322,7 @@ class MainActivity : Activity() {
         ))
         driveCameraPanel = DriveCameraPanel(this, parkingPalette()).also { panel ->
             panel.layoutParams = matchWrapParams(bottom = 12)
+            panel.setOnFullscreenRequested { enterFullscreenDrive() }
             pageContent.addView(panel)
             panel.start(api().cameraStreamUrl())
         }
@@ -2740,9 +2843,11 @@ class MainActivity : Activity() {
 
     private fun updateSpeedText() {
         txtSpeed?.text = String.format(Locale.US, "速度 %.2f m/s，转向 %.2f rad/s", currentSpeed(), currentTurn())
+        fullscreenDriveOverlay?.updateSpeed(currentSpeed(), currentTurn())
     }
 
     private fun updateDriveState() {
+        fullscreenDriveOverlay?.updateMotion(currentMotionLabel)
         txtDriveState?.animate()
             ?.alpha(0.55f)
             ?.scaleX(0.98f)

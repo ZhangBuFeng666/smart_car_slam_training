@@ -94,3 +94,48 @@ alive inside the selected container, so Android movement requests no longer
 start a new Docker and ROS process for every touch event. The bridge includes
 a 350 ms automatic-stop watchdog, while the Android hold control refreshes at
 120 ms.
+
+## Jarvis patrol agent
+
+Jarvis is a separate FastAPI service for natural-language patrol planning,
+mission persistence, simulated vision events, and patrol reports. It listens on
+port `8100` and calls the existing car control service on port `8000`.
+
+Create and install the Python environment on Jetson:
+
+```bash
+cd /opt/jarvis-agent
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "jarvis_agent[test]"
+cp jarvis_agent/.env.example .env
+```
+
+Edit `.env` and set `JARVIS_APP_TOKEN` and `DEEPSEEK_API_KEY`. Real secrets
+must never be committed to Git, copied into Android resources, or printed in
+logs.
+
+Run in the foreground:
+
+```bash
+.venv/bin/python -m uvicorn jarvis_agent.api:create_app --factory --host 0.0.0.0 --port 8100
+curl http://127.0.0.1:8100/health
+```
+
+Install as a systemd service:
+
+```bash
+sudo cp jarvis_agent/deploy/jarvis-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now jarvis-agent
+sudo systemctl status jarvis-agent
+```
+
+Run the simulated parking-lot event flow after creating a mission:
+
+```bash
+.venv/bin/python -m jarvis_agent.simulator \
+  --base-url http://127.0.0.1:8100 \
+  --token "$JARVIS_APP_TOKEN" \
+  --mission-id "$MISSION_ID" \
+  --scenario parking-lot
+```

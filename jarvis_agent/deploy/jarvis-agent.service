@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis smart car patrol agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jarvis-agent
+EnvironmentFile=/opt/jarvis-agent/.env
+ExecStart=/opt/jarvis-agent/.venv/bin/python -m uvicorn jarvis_agent.api:create_app --factory --host 0.0.0.0 --port 8100
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

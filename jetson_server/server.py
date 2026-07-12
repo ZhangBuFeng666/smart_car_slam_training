@@ -13,6 +13,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+try:
+    from .camera_stream import CameraCaptureService
+except ImportError:
+    from camera_stream import CameraCaptureService
+
 
 ROS_DOMAIN_ID = 32
 ROS_SETUP = (
@@ -67,6 +72,7 @@ SERVER_CONFIG = {
     "dry_run": False,
 }
 MOTION_BRIDGE = None
+CAMERA_STREAM = None
 
 
 class MotionBridgeClient:
@@ -216,6 +222,26 @@ def create_motion_bridge(container):
     return MotionBridgeClient(
         container=container,
         script_path=Path(__file__).with_name("motion_bridge.py"),
+    )
+
+
+def create_camera_stream(device, width, height, fps, quality):
+    return CameraCaptureService(
+        configured_device=device,
+        width=width,
+        height=height,
+        fps=fps,
+        jpeg_quality=quality,
+    )
+
+
+def build_mjpeg_chunk(jpeg):
+    return (
+        b"--frame\r\n"
+        b"Content-Type: image/jpeg\r\n"
+        + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+        + jpeg
+        + b"\r\n"
     )
 
 
@@ -443,6 +469,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.strip("/")
         query = parse_qs(parsed.query)
 
+        if path == "camera/stream":
+            self.stream_camera()
+            return
+
         try:
             status, body = self.route(path, query)
         except ValueError as error:
@@ -451,7 +481,54 @@ class Handler(BaseHTTPRequestHandler):
             status, body = 500, {"error": str(error)}
         self.reply(status, body)
 
+    def stream_camera(self):
+        if CAMERA_STREAM is None:
+            self.reply(503, {"state": "unavailable", "error": "camera service unavailable"})
+            return
+
+        CAMERA_STREAM.acquire_client()
+        try:
+            if not CAMERA_STREAM.wait_until_ready(timeout=2.0):
+                snapshot = CAMERA_STREAM.status()
+                state = snapshot.get("state", "unavailable")
+                error = snapshot.get("error") or f"camera {state}"
+                self.reply(503, {"state": state, "error": error})
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            sequence = 0
+            while True:
+                next_sequence, jpeg = CAMERA_STREAM.wait_for_frame(sequence, timeout=1.0)
+                if jpeg is None:
+                    if CAMERA_STREAM.status().get("state") in {
+                        "busy",
+                        "disconnected",
+                        "idle",
+                        "missing",
+                    }:
+                        break
+                    continue
+                if next_sequence <= sequence:
+                    continue
+                sequence = next_sequence
+                self.wfile.write(build_mjpeg_chunk(jpeg))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            CAMERA_STREAM.release_client()
+
     def route(self, path, query):
+        if path == "camera/status":
+            return 200, CAMERA_STREAM.status()
+        if path == "camera/restart":
+            return 200, CAMERA_STREAM.restart()
         if path == "health":
             return 200, {
                 "ok": True,
@@ -508,16 +585,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global MOTION_BRIDGE
+    global CAMERA_STREAM, MOTION_BRIDGE
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default="8b98")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--camera-device", default=None)
+    parser.add_argument("--camera-width", type=int, default=640)
+    parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument("--camera-fps", type=int, default=18)
+    parser.add_argument("--camera-quality", type=int, default=70)
     args = parser.parse_args()
     SERVER_CONFIG["container"] = args.container
     SERVER_CONFIG["dry_run"] = args.dry_run
     MOTION_BRIDGE = create_motion_bridge(args.container)
+    CAMERA_STREAM = create_camera_stream(
+        device=args.camera_device,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+        quality=args.camera_quality,
+    )
 
     if not args.dry_run:
         try:

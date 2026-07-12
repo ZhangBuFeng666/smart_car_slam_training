@@ -1,0 +1,26 @@
+{
+  "summary": "Start camera monitoring and obstacle avoidance after checking system status.",
+  "steps": [
+    {
+      "action": "CHECK_STATUS",
+      "arguments": {}
+    },
+    {
+      "action": "START_TASK",
+      "arguments": {
+        "task": "camera"
+      }
+    },
+    {
+      "action": "START_TASK",
+      "arguments": {
+        "task": "avoidance"
+      }
+    }
+  ],
+  "completion_criteria": [
+    "Camera monitoring is active.",
+    "Obstacle avoidance is active."
+  ],
+  "requires_confirmation": true
+}

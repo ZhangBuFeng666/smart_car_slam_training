@@ -70,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var globalThemeToggle: TextView
     private lateinit var navViews: Map<String, TextView>
     private lateinit var parkingThemeStore: ParkingThemeStore
+    private lateinit var jarvisCredentials: JarvisCredentials
 
     private var hostInput: EditText? = null
     private var portInput: EditText? = null
@@ -85,6 +86,7 @@ class MainActivity : Activity() {
     private var driveSpeedSeekBar: SeekBar? = null
     private var homeConnectionText: TextView? = null
     private var pageStatusText: TextView? = null
+    private var jarvisTokenInput: EditText? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val commandExecutor = Executors.newSingleThreadExecutor()
@@ -96,6 +98,9 @@ class MainActivity : Activity() {
     private var selectedPage = "home"
     private var currentHost = "10.161.57.230"
     private var currentPort = 8000
+    private var jarvisCurrentPlan: JarvisMissionPlan? = null
+    private var jarvisMissionId: String? = null
+    private var jarvisToken = ""
     private var speedProgress = 13
     private var currentDirection: String? = null
     private var currentMotionLabel = "待命"
@@ -117,6 +122,8 @@ class MainActivity : Activity() {
 
         parkingThemeStore = ParkingThemeStore(this)
         parkingThemeMode = parkingThemeStore.load()
+        jarvisCredentials = JarvisCredentials(this)
+        jarvisToken = jarvisCredentials.loadToken()
 
         pageContent = findViewById(R.id.pageContent)
         scrollContent = findViewById(R.id.scrollContent)
@@ -411,10 +418,10 @@ class MainActivity : Activity() {
 
     private fun renderAiPage() {
         pageContent.addView(parkingPageHeader(
-            kicker = "B2 / AI PATROL",
-            title = "安排巡逻",
-            subtitle = "用自然语言组合导航、避障、视觉复查与限制区警卫。",
-            status = "仅生成预览"
+            kicker = JarvisUiSpec.headerKicker(),
+            title = JarvisUiSpec.headerTitle(),
+            subtitle = JarvisUiSpec.headerSubtitle(),
+            status = "连接 8100"
         ))
         pageContent.addView(parkingAiWorkspace())
         pageContent.addView(parkingSafetyStrip())
@@ -1268,11 +1275,22 @@ class MainActivity : Activity() {
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             })
             addView(TextView(this@MainActivity).apply {
-                text = "当前阶段只生成任务预览，不会直接控制小车。"
+                text = "连接 Jetson 8100 智能体，先生成白名单计划，确认后才调用小车控制服务。"
                 setTextColor(color(palette.textSecondary))
                 textSize = 10f
             }, matchWrapParams(top = 4))
         }
+
+        jarvisTokenInput = EditText(this@MainActivity).apply {
+            hint = "Jarvis Token"
+            setText(jarvisToken)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(color(palette.textPrimary))
+            setHintTextColor(color(palette.textSecondary))
+            background = roundedBackground(palette.surface, palette.border, 16)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+        }
+        promptSurface.addView(jarvisTokenInput, matchWrapParams(top = 12))
 
         val input = EditText(this@MainActivity).apply {
             hint = "描述本次停车场巡逻任务..."
@@ -1311,7 +1329,7 @@ class MainActivity : Activity() {
         promptSurface.addView(examplesScroll, matchWrapParams(top = 10))
 
         addView(promptSurface, matchWrapParams(bottom = 18))
-        addView(parkingSectionTitle("任务预览", "确认步骤后再逐项接入真实服务"))
+        addView(parkingSectionTitle("Jarvis 安全计划", "确认前只展示计划，确认后才执行控制动作"))
 
         val timeline = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
         val defaultSteps = listOf(
@@ -1327,21 +1345,129 @@ class MainActivity : Activity() {
 
         val actions = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(parkingOutlineButton("清空") {
-                input.text.clear()
+            addView(parkingOutlineButton(JarvisUiSpec.primaryActions()[1]) {
+                val plan = jarvisCurrentPlan
+                val token = saveJarvisToken()
+                if (plan == null || token.isBlank()) {
+                    setStatus("请先生成 Jarvis 计划")
+                    appendLog("Jarvis：没有可确认的计划")
+                    return@parkingOutlineButton
+                }
+                setStatus("Jarvis 正在确认执行")
+                commandExecutor.execute {
+                    val result = runCatching {
+                        val api = JarvisApi(currentHost, token)
+                        val mission = api.createMission(plan)
+                        val confirmed = api.confirmMission(mission.id)
+                        val entries = api.getTimeline(confirmed.id)
+                        jarvisMissionId = confirmed.id
+                        entries
+                    }
+                    runOnUiThread {
+                        result.fold(
+                            onSuccess = { entries ->
+                                timeline.removeAllViews()
+                                entries.forEachIndexed { index, entry ->
+                                    timeline.addView(parkingTimelineStep("%02d".format(index + 1), "${entry.kind}: ${entry.message}", index == 0))
+                                }
+                                setStatus("Jarvis 任务已执行")
+                                appendLog("Jarvis：任务已确认执行")
+                            },
+                            onFailure = { error ->
+                                setStatus("Jarvis 执行失败")
+                                appendLog("Jarvis 执行失败：${error.message ?: error.javaClass.simpleName}")
+                            }
+                        )
+                    }
+                }
             }, LinearLayout.LayoutParams(0, dp(50), 0.34f))
-            addView(parkingPrimaryButton("生成任务预览") {
+            addView(parkingPrimaryButton(JarvisUiSpec.primaryActions()[0]) {
                 val mission = input.text.toString().ifBlank { FeatureCatalog.aiExamples().first() }
                 input.setText(mission)
-                timeline.removeAllViews()
-                defaultSteps.forEachIndexed { index, step ->
-                    timeline.addView(parkingTimelineStep(step.first, step.second, index == 0))
+                val token = saveJarvisToken()
+                if (token.isBlank()) {
+                    setStatus("请先填写 Jarvis Token")
+                    appendLog("Jarvis：缺少 Token")
+                    return@parkingPrimaryButton
                 }
-                setStatus("任务预览已生成")
-                appendLog("AI 任务预览：$mission")
+                setStatus("Jarvis 正在生成计划")
+                commandExecutor.execute {
+                    val result = runCatching { JarvisApi(currentHost, token).chat(mission) }
+                    runOnUiThread {
+                        result.fold(
+                            onSuccess = { plan ->
+                                jarvisCurrentPlan = plan
+                                timeline.removeAllViews()
+                                plan.steps.forEachIndexed { index, step ->
+                                    val task = step.arguments["task"]?.toString()?.let { " $it" }.orEmpty()
+                                    timeline.addView(parkingTimelineStep("%02d".format(index + 1), "${step.action.name}$task", index == 0))
+                                }
+                                setStatus("Jarvis 计划已生成")
+                                appendLog("Jarvis 计划：${plan.summary}")
+                            },
+                            onFailure = { error ->
+                                setStatus("Jarvis 计划失败")
+                                appendLog("Jarvis 计划失败：${error.message ?: error.javaClass.simpleName}")
+                            }
+                        )
+                    }
+                }
             }, LinearLayout.LayoutParams(0, dp(50), 0.66f).apply { setMargins(dp(9), 0, 0, 0) })
         }
         addView(actions, matchWrapParams(top = 14, bottom = 12))
+        val missionActions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton(JarvisUiSpec.secondaryActions()[0]) {
+                val missionId = jarvisMissionId
+                val token = saveJarvisToken()
+                if (missionId == null || token.isBlank()) {
+                    setStatus("暂无 Jarvis 任务")
+                    return@parkingOutlineButton
+                }
+                setStatus("刷新 Jarvis 任务")
+                commandExecutor.execute {
+                    val result = runCatching { JarvisApi(currentHost, token).getTimeline(missionId) }
+                    runOnUiThread {
+                        result.fold(
+                            onSuccess = { entries ->
+                                timeline.removeAllViews()
+                                entries.forEachIndexed { index, entry ->
+                                    timeline.addView(parkingTimelineStep("%02d".format(index + 1), "${entry.kind}: ${entry.message}", index == 0))
+                                }
+                                setStatus("Jarvis 任务已刷新")
+                            },
+                            onFailure = { setStatus("Jarvis 刷新失败") }
+                        )
+                    }
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(parkingOutlineButton(JarvisUiSpec.secondaryActions()[1]) {
+                val missionId = jarvisMissionId
+                val token = saveJarvisToken()
+                if (missionId == null || token.isBlank()) {
+                    setStatus("暂无 Jarvis 报告")
+                    return@parkingOutlineButton
+                }
+                setStatus("读取 Jarvis 报告")
+                commandExecutor.execute {
+                    val result = runCatching { JarvisApi(currentHost, token).getReport(missionId) }
+                    runOnUiThread {
+                        result.fold(
+                            onSuccess = { report ->
+                                timeline.removeAllViews()
+                                timeline.addView(parkingTimelineStep("OK", report.markdown.take(120), true))
+                                setStatus("Jarvis 报告已生成")
+                            },
+                            onFailure = { setStatus("Jarvis 报告失败") }
+                        )
+                    }
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(8), 0, 0, 0) })
+            addView(dangerButton(JarvisUiSpec.dangerAction()) {
+                sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(8), 0, 0, 0) })
+        }
+        addView(missionActions, matchWrapParams(bottom = 12))
     }
 
     private fun parkingTimelineStep(number: String, title: String, active: Boolean): LinearLayout =
@@ -2872,6 +2998,15 @@ class MainActivity : Activity() {
         if (DriveSafetySpec.shouldStop(currentDirection, event)) {
             stopMove()
         }
+    }
+
+    private fun saveJarvisToken(): String {
+        val token = jarvisTokenInput?.text?.toString().orEmpty().trim()
+        jarvisToken = token
+        if (token.isNotBlank()) {
+            jarvisCredentials.saveToken(token)
+        }
+        return token
     }
 
     private fun sendMove(direction: String, quiet: Boolean) {

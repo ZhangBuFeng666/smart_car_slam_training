@@ -1,0 +1,7 @@
+{
+  "version": "v1",
+  "actions": ["CHECK_STATUS", "START_TASK", "STOP_TASK", "STOP_ALL", "RECORD_EVENT", "ASK_USER", "GENERATE_REPORT"],
+  "mission_states": ["DRAFT", "WAITING_CONFIRMATION", "RUNNING", "PAUSED", "FAILED", "CANCELLED", "COMPLETED"],
+  "decision_types": ["continue", "ignore", "pause", "finish"],
+  "allowed_tasks": ["base", "lidar", "avoidance", "follow", "warning", "camera", "hsv", "color_track"]
+}

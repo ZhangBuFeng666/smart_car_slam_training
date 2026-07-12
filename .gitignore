@@ -18,6 +18,14 @@ window_home.xml
 __pycache__/
 *.pyc
 
+# Jarvis local runtime
+jarvis_agent/.env
+jarvis_agent/.venv/
+jarvis_agent/data/
+jarvis_agent/**/*.db
+jarvis_agent/**/*.db-shm
+jarvis_agent/**/*.db-wal
+
 # Local design-tool previews and runtime state
 .superpowers/
 .worktrees/

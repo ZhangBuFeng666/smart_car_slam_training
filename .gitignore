@@ -33,3 +33,10 @@ jarvis_agent/**/*.db-wal
 # OS
 Thumbs.db
 .DS_Store
+# parking_detect
+parking_detect/datasets/parking_dataset/images/
+parking_detect/datasets/parking_dataset/labels/
+parking_detect/**/labels.cache
+parking_detect/runs/**/weights/
+parking_detect/wandb/
+parking_detect/.venv/

@@ -1,0 +1,15 @@
+path: datasets/parking_dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: parking_slot
+  1: car
+  2: no_parking_sign
+  3: entrance_sign
+  4: exit_sign
+  5: direction_arrow
+  6: stop_line
+  7: roadblock
+  8: danger_sign

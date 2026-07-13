@@ -24,6 +24,15 @@ class MissionState(str, Enum):
     COMPLETED = "COMPLETED"
 
 
+class ControlTaskState(str, Enum):
+    DRAFT = "DRAFT"
+    STARTING = "STARTING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    STOPPED = "STOPPED"
+    FAILED = "FAILED"
+
+
 class DecisionType(str, Enum):
     CONTINUE = "continue"
     IGNORE = "ignore"
@@ -66,9 +75,24 @@ class ChatRequest(ExternalModel):
         return value
 
 
+class ControlTaskView(ExternalModel):
+    id: str
+    title: str
+    kind: str
+    state: ControlTaskState
+    steps: List[str]
+    completed_steps: int = 0
+    current_message: str
+    current_value: float = 0.0
+    target_value: float = 0.0
+    unit: str = ""
+    result: Optional[str] = None
+
+
 class ChatResponse(ExternalModel):
     reply: str
     plan: Optional[MissionPlan] = None
+    control_task: Optional[ControlTaskView] = None
 
 
 class MissionCreateRequest(ExternalModel):

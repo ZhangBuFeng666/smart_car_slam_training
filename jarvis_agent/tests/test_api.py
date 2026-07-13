@@ -35,6 +35,10 @@ class FakeControl:
     def __init__(self):
         self.calls = []
 
+    async def health(self):
+        self.calls.append(("health", None))
+        return {"ok": True}
+
     async def status(self):
         self.calls.append(("status", None))
         return {"ok": True}
@@ -128,7 +132,7 @@ def test_chat_greeting_returns_reply_without_plan(tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"reply": "你好，我在。有什么可以帮你？", "plan": None}
+    assert response.json() == {"reply": "你好，我在。有什么可以帮你？"}
     assert planner.calls == []
 
 
@@ -149,7 +153,7 @@ def test_chat_only_plans_when_explicitly_requested(tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json()["plan"] is None
+    assert "plan" not in response.json()
     assert planner.calls == []
 
 
@@ -163,8 +167,29 @@ def test_chat_directly_starts_avoidance_with_dependencies(tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"reply": "已成功开启自动避障功能。", "plan": None}
+    body = response.json()
+    assert body["reply"] == "功能任务已准备，确认后启动。"
+    assert body["control_task"]["state"] == "DRAFT"
+    assert control.calls == []
+
+    started = test_client.post(
+        "/api/v1/control-tasks/%s/start" % body["control_task"]["id"],
+        headers=auth(),
+    )
+    assert started.status_code == 200
+    for _ in range(20):
+        status = test_client.get(
+            "/api/v1/control-tasks/%s" % body["control_task"]["id"],
+            headers=auth(),
+        ).json()
+        if status["state"] == "COMPLETED":
+            break
+        import time
+        time.sleep(0.01)
+
+    assert status["result"] == "已成功开启自动避障功能。"
     assert control.calls == [
+        ("health", None),
         ("start", "base"),
         ("start", "lidar"),
         ("start", "avoidance"),
@@ -185,12 +210,9 @@ def test_chat_directly_starts_follow_and_warning(tmp_path):
         json={"message": "启动自动警卫", "context": {}},
     )
 
-    assert follow.json()["reply"] == "已成功开启自动跟随功能。"
-    assert warning.json()["reply"] == "已成功开启自动警卫功能。"
-    assert control.calls == [
-        ("start", "base"), ("start", "lidar"), ("start", "follow"),
-        ("start", "base"), ("start", "lidar"), ("start", "warning"),
-    ]
+    assert follow.json()["control_task"]["state"] == "DRAFT"
+    assert warning.json()["control_task"]["state"] == "DRAFT"
+    assert control.calls == []
 
 
 def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
@@ -203,8 +225,24 @@ def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"reply": "已完成前进并停止。", "plan": None}
-    assert control.calls[0][0:2] == ("move", "front")
+    body = response.json()
+    assert body["control_task"]["state"] == "DRAFT"
+    assert control.calls == []
+
+    test_client.post(
+        "/api/v1/control-tasks/%s/start" % body["control_task"]["id"],
+        headers=auth(),
+    )
+    import time
+    for _ in range(50):
+        status = test_client.get(
+            "/api/v1/control-tasks/%s" % body["control_task"]["id"],
+            headers=auth(),
+        ).json()
+        if status["state"] == "COMPLETED":
+            break
+        time.sleep(0.01)
+    assert status["result"] == "已完成前进并停止。"
     assert control.calls[-1][0:2] == ("move", "stop")
 
 
@@ -217,7 +255,7 @@ def test_chat_stop_command_stops_immediately(tmp_path):
         json={"message": "停止移动", "context": {}},
     )
 
-    assert response.json() == {"reply": "小车已停止。", "plan": None}
+    assert response.json() == {"reply": "小车已停止。"}
     assert control.calls == [("move", "stop", 0.2, 0.65)]
 
 

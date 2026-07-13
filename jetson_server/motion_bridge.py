@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import select
 import signal
 import sys
@@ -83,6 +84,37 @@ class MotionWatchdog:
         return True
 
 
+class OdometryTracker:
+    def __init__(self, clock: Callable[[], float] = time.perf_counter):
+        self.clock = clock
+        self.distance_m = 0.0
+        self.last_update = None
+        self.linear_x = 0.0
+        self.linear_y = 0.0
+        self.angular_z = 0.0
+        self.lock = threading.Lock()
+
+    def update(self, linear_x, linear_y, angular_z, now=None) -> None:
+        timestamp = self.clock() if now is None else float(now)
+        with self.lock:
+            if self.last_update is not None:
+                elapsed = max(0.0, timestamp - self.last_update)
+                self.distance_m += math.hypot(self.linear_x, self.linear_y) * elapsed
+            self.last_update = timestamp
+            self.linear_x = float(linear_x)
+            self.linear_y = float(linear_y)
+            self.angular_z = float(angular_z)
+
+    def snapshot(self) -> Dict[str, float]:
+        with self.lock:
+            return {
+                "distance_m": round(self.distance_m, 4),
+                "measured_linear_x": self.linear_x,
+                "measured_linear_y": self.linear_y,
+                "measured_angular_z": self.angular_z,
+            }
+
+
 class MotionBridgeRuntime:
     def __init__(
         self,
@@ -93,6 +125,10 @@ class MotionBridgeRuntime:
         self.publish_twist = publish_twist
         self.clock = clock
         self.watchdog = MotionWatchdog(watchdog_seconds)
+        self.odometry = OdometryTracker()
+
+    def update_odometry(self, linear_x, linear_y, angular_z, now=None) -> None:
+        self.odometry.update(linear_x, linear_y, angular_z, now=now)
 
     def handle_line(self, raw: str) -> Dict[str, object]:
         started_at = self.clock()
@@ -101,7 +137,7 @@ class MotionBridgeRuntime:
         self.publish_twist(values)
         self.watchdog.update(command.direction, started_at)
         elapsed_ms = round((self.clock() - started_at) * 1000.0, 3)
-        return {
+        response = {
             "ok": True,
             "sequence": command.sequence,
             "direction": command.direction,
@@ -110,6 +146,8 @@ class MotionBridgeRuntime:
             "angular_z": values[2],
             "bridge_latency_ms": elapsed_ms,
         }
+        response.update(self.odometry.snapshot())
+        return response
 
     def poll_watchdog(self, now: Optional[float] = None) -> bool:
         current = self.clock() if now is None else float(now)
@@ -148,6 +186,15 @@ def main() -> None:
         publish_twist=publish,
         watchdog_seconds=max(args.watchdog_ms, 100) / 1000.0,
     )
+
+    def measured_velocity(message: Twist) -> None:
+        runtime.update_odometry(
+            message.linear.x,
+            message.linear.y,
+            message.angular.z,
+        )
+
+    node.create_subscription(Twist, "/vel_raw", measured_velocity, 10)
 
     def request_stop(_signum, _frame) -> None:
         stopping.set()

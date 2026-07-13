@@ -92,10 +92,43 @@ data class JarvisReport(
     val createdAt: String
 )
 
+enum class JarvisControlTaskState {
+    DRAFT, STARTING, RUNNING, COMPLETED, STOPPED, FAILED
+}
+
+data class JarvisControlTask(
+    val id: String,
+    val title: String,
+    val kind: String,
+    val state: JarvisControlTaskState,
+    val steps: List<String>,
+    val completedSteps: Int,
+    val currentMessage: String,
+    val currentValue: Double,
+    val targetValue: Double,
+    val unit: String,
+    val result: String?
+)
+
 class JarvisProtocolException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
 
 object JarvisJson {
+    fun parseControlTask(obj: JSONObject): JarvisControlTask = wrap {
+        JarvisControlTask(
+            id = requiredString(obj, "id"),
+            title = requiredString(obj, "title"),
+            kind = requiredString(obj, "kind"),
+            state = enumValue(requiredString(obj, "state")),
+            steps = obj.getJSONArray("steps").toStringList(),
+            completedSteps = obj.optInt("completed_steps", 0),
+            currentMessage = requiredString(obj, "current_message"),
+            currentValue = obj.optDouble("current_value", 0.0),
+            targetValue = obj.optDouble("target_value", 0.0),
+            unit = obj.optString("unit"),
+            result = obj.optNullableString("result")
+        )
+    }
     @JvmStatic
     fun parseMission(json: String): JarvisMission = wrap {
         parseMission(JSONObject(json))

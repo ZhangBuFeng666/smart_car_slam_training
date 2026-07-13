@@ -45,6 +45,7 @@ sealed class JarvisChatItem {
     data class UserMessage(val text: String, val timestamp: String) : JarvisChatItem()
     data class AssistantMessage(val text: String, val timestamp: String) : JarvisChatItem()
     data class PlanCard(val plan: JarvisMissionPlan, val timestamp: String) : JarvisChatItem()
+    data class ControlTaskCard(val task: JarvisControlTask, val timestamp: String) : JarvisChatItem()
     data class ProgressCard(
         val mission: JarvisMission,
         val timeline: List<JarvisTimelineEntry>,
@@ -61,6 +62,8 @@ sealed class JarvisEvent {
     data class UserMessageSubmitted(val message: String) : JarvisEvent()
     data class SystemMessageAdded(val message: String) : JarvisEvent()
     data class ChatReply(val message: String) : JarvisEvent()
+    data class ControlTaskReady(val task: JarvisControlTask) : JarvisEvent()
+    data class ControlTaskUpdated(val task: JarvisControlTask) : JarvisEvent()
     data class PlanReady(val plan: JarvisMissionPlan) : JarvisEvent()
     data class MissionUpdated(
         val mission: JarvisMission,
@@ -103,6 +106,21 @@ object JarvisReducer {
                 errorMessage = null,
                 chatItems = withoutTrailingLoading(state.chatItems) +
                     JarvisChatItem.AssistantMessage(event.message, timestamp())
+            )
+            is JarvisEvent.ControlTaskReady -> state.copy(
+                mode = JarvisScreenMode.IDLE,
+                loading = false,
+                errorMessage = null,
+                chatItems = withoutTrailingLoading(state.chatItems) +
+                    JarvisChatItem.ControlTaskCard(event.task, timestamp())
+            )
+            is JarvisEvent.ControlTaskUpdated -> state.copy(
+                loading = false,
+                chatItems = state.chatItems.map {
+                    if (it is JarvisChatItem.ControlTaskCard && it.task.id == event.task.id) {
+                        JarvisChatItem.ControlTaskCard(event.task, it.timestamp)
+                    } else it
+                }
             )
             is JarvisEvent.PlanReady -> state.copy(
                 mode = JarvisScreenMode.PLAN_READY,

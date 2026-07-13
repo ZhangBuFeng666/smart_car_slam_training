@@ -2,6 +2,8 @@ import secrets
 import logging
 import asyncio
 import re
+import uuid
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +25,8 @@ from jarvis_agent.mission_engine import MissionEngine, MissionNotFoundError
 from jarvis_agent.models import (
     ChatRequest,
     ChatResponse,
+    ControlTaskState,
+    ControlTaskView,
     DecisionType,
     DecisionRequest,
     MissionCreateRequest,
@@ -67,6 +71,9 @@ def create_app(
         repository, cooldown_seconds=settings.event_cooldown_seconds
     )
     reports = ReportService(repository)
+    control_tasks = {}
+    control_specs = {}
+    control_cancellations = {}
 
     def require_auth(authorization: str = Header(default="")) -> None:
         expected = "Bearer %s" % settings.jarvis_app_token
@@ -91,6 +98,7 @@ def create_app(
     @app.post(
         "/api/v1/chat",
         response_model=ChatResponse,
+        response_model_exclude_none=True,
         dependencies=[Depends(require_auth)],
     )
     async def chat(request: ChatRequest):
@@ -108,51 +116,97 @@ def create_app(
 
         motion_command = _direct_motion_command(request.message)
         if motion_command is not None:
-            direction, label, duration = motion_command
-            if direction == "stop":
+            if motion_command[0] == "stop":
                 await control.move("stop")
                 return ChatResponse(reply="小车已停止。", plan=None)
-            try:
-                deadline = asyncio.get_running_loop().time() + duration
-                while True:
-                    await control.move(direction)
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        break
-                    await asyncio.sleep(min(0.15, remaining))
-                return ChatResponse(reply="已完成%s并停止。" % label, plan=None)
-            except Exception as exc:
-                logger.warning("Direct motion command failed", exc_info=exc)
-                return ChatResponse(reply="小车%s失败，请检查控制服务。" % label, plan=None)
-            finally:
-                try:
-                    await control.move("stop")
-                except Exception:
-                    logger.exception("Failed to stop after direct motion command")
+            task, spec = _motion_control_task(motion_command)
+            control_tasks[task.id] = task
+            control_specs[task.id] = spec
+            return ChatResponse(reply="控制任务已准备，确认后启动。", control_task=task)
 
         direct_command = _direct_task_command(request.message)
         if direct_command is not None:
             task, label, start = direct_command
-            try:
-                if start:
-                    if task in {"avoidance", "follow", "warning"}:
-                        await control.start_task("base")
-                        await control.start_task("lidar")
-                    await control.start_task(task)
-                    reply = "已成功开启%s功能。" % label
-                else:
-                    await control.stop_task(task)
-                    reply = "已成功关闭%s功能。" % label
-                return ChatResponse(reply=reply, plan=None)
-            except Exception as exc:
-                logger.warning("Direct control command failed", exc_info=exc)
-                return ChatResponse(reply="%s功能操作失败，请检查小车服务状态。" % label, plan=None)
+            if not start:
+                await control.stop_task(task)
+                return ChatResponse(reply="已成功关闭%s功能。" % label, plan=None)
+            view, spec = _feature_control_task(task, label)
+            control_tasks[view.id] = view
+            control_specs[view.id] = spec
+            return ChatResponse(reply="功能任务已准备，确认后启动。", control_task=view)
 
         try:
             reply = await planner.reply(request.message, request.context)
         except (AttributeError, ModelTimeoutError, ModelUnavailableError, ModelResponseError):
             reply = _casual_reply(request.message)
         return ChatResponse(reply=reply, plan=None)
+
+    @app.get(
+        "/api/v1/control-tasks/{task_id}",
+        response_model=ControlTaskView,
+        dependencies=[Depends(require_auth)],
+    )
+    def get_control_task(task_id: str):
+        task = control_tasks.get(task_id)
+        if task is None:
+            raise _http_error(404, "CONTROL_TASK_NOT_FOUND", "Control task not found")
+        return task
+
+    @app.post(
+        "/api/v1/control-tasks/{task_id}/start",
+        response_model=ControlTaskView,
+        dependencies=[Depends(require_auth)],
+    )
+    async def start_control_task(task_id: str):
+        task = control_tasks.get(task_id)
+        if task is None:
+            raise _http_error(404, "CONTROL_TASK_NOT_FOUND", "Control task not found")
+        if task.state in {ControlTaskState.STARTING, ControlTaskState.RUNNING}:
+            return task
+        cancellation = threading.Event()
+        control_cancellations[task_id] = cancellation
+        control_tasks[task_id] = task.model_copy(
+            update={"state": ControlTaskState.STARTING, "current_message": "正在检查小车服务"}
+        )
+        threading.Thread(
+            target=lambda: asyncio.run(
+                _run_control_task(
+                    task_id,
+                    control,
+                    control_tasks,
+                    control_specs[task_id],
+                    cancellation,
+                )
+            ),
+            name="jarvis-control-%s" % task_id[:8],
+            daemon=True,
+        ).start()
+        return control_tasks[task_id]
+
+    @app.post(
+        "/api/v1/control-tasks/{task_id}/stop",
+        response_model=ControlTaskView,
+        dependencies=[Depends(require_auth)],
+    )
+    async def stop_control_task(task_id: str):
+        task = control_tasks.get(task_id)
+        if task is None:
+            raise _http_error(404, "CONTROL_TASK_NOT_FOUND", "Control task not found")
+        cancellation = control_cancellations.get(task_id)
+        if cancellation is not None:
+            cancellation.set()
+        spec = control_specs[task_id]
+        await control.move("stop")
+        if spec["kind"] == "feature":
+            await control.stop_task(spec["task"])
+        control_tasks[task_id] = task.model_copy(
+            update={
+                "state": ControlTaskState.STOPPED,
+                "current_message": "任务已停止",
+                "result": "已停止",
+            }
+        )
+        return control_tasks[task_id]
 
     @app.post("/api/v1/missions", dependencies=[Depends(require_auth)])
     def create_mission(request: MissionCreateRequest):
@@ -300,10 +354,143 @@ def _direct_motion_command(message: str):
     )
     for aliases, direction, label in motions:
         if any(alias in text for alias in aliases):
-            match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|s|seconds?)", text)
-            duration = float(match.group(1)) if match else 0.8
-            return direction, label, max(0.2, min(duration, 3.0))
+            distance_match = re.search(r"(\d+(?:\.\d+)?)\s*(米|m|厘米|cm)", text)
+            if distance_match:
+                distance = float(distance_match.group(1))
+                if distance_match.group(2) in {"厘米", "cm"}:
+                    distance /= 100.0
+                return direction, label, "distance", max(0.05, min(distance, 3.0))
+            time_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|s|seconds?)", text)
+            duration = float(time_match.group(1)) if time_match else 0.8
+            return direction, label, "time", max(0.2, min(duration, 3.0))
     return None
+
+
+def _motion_control_task(command):
+    direction, label, mode, target = command
+    unit = "米" if mode == "distance" else "秒"
+    title = "%s %g%s" % (label, target, unit)
+    task = ControlTaskView(
+        id=uuid.uuid4().hex,
+        title=title,
+        kind="motion",
+        state=ControlTaskState.DRAFT,
+        steps=["检查控制服务", "启动底盘驱动", "执行%s" % label, "到达目标并停车"],
+        current_message="等待启动",
+        target_value=target,
+        unit=unit,
+    )
+    return task, {
+        "kind": "motion",
+        "direction": direction,
+        "label": label,
+        "mode": mode,
+        "target": target,
+    }
+
+
+def _feature_control_task(task_name, label):
+    dependencies = task_name in {"avoidance", "follow", "warning"}
+    steps = ["检查控制服务", "启动底盘驱动"]
+    if dependencies:
+        steps.append("启动激光雷达")
+    steps.extend(["启动%s" % label, "确认运行状态"])
+    task = ControlTaskView(
+        id=uuid.uuid4().hex,
+        title="启动%s" % label,
+        kind="feature",
+        state=ControlTaskState.DRAFT,
+        steps=steps,
+        current_message="等待启动",
+    )
+    return task, {
+        "kind": "feature",
+        "task": task_name,
+        "label": label,
+        "dependencies": dependencies,
+    }
+
+
+async def _run_control_task(task_id, control, tasks, spec, cancellation):
+    task = tasks[task_id]
+
+    def update(**values):
+        tasks[task_id] = tasks[task_id].model_copy(update=values)
+
+    try:
+        await control.health()
+        update(completed_steps=1, current_message="正在启动底盘驱动")
+        await control.start_task("base")
+        update(completed_steps=2, state=ControlTaskState.RUNNING)
+
+        if spec["kind"] == "feature":
+            if spec["dependencies"]:
+                update(current_message="正在启动激光雷达")
+                await control.start_task("lidar")
+                update(completed_steps=3)
+            update(current_message="正在启动%s" % spec["label"])
+            start_result = await control.start_task(spec["task"])
+            next_step = 4 if spec["dependencies"] else 3
+            update(completed_steps=next_step, current_message="正在确认运行状态")
+            if start_result.get("status") not in {
+                "started",
+                "already_running",
+                "finished",
+                "dry_run",
+            } and not start_result.get("started"):
+                raise RuntimeError("target process did not start")
+            result = "已成功开启%s功能。" % spec["label"]
+            update(
+                completed_steps=len(tasks[task_id].steps),
+                state=ControlTaskState.COMPLETED,
+                current_message=result,
+                result=result,
+            )
+            return
+
+        update(current_message="正在%s" % spec["label"])
+        baseline_response = await control.move("stop")
+        baseline = float(baseline_response.get("distance_m", 0.0))
+        started = asyncio.get_running_loop().time()
+        target = float(spec["target"])
+        timeout = max(5.0, target / 0.1 * 2.5)
+        while not cancellation.is_set():
+            response = await control.move(spec["direction"])
+            elapsed = asyncio.get_running_loop().time() - started
+            if spec["mode"] == "distance":
+                current = max(0.0, float(response.get("distance_m", baseline)) - baseline)
+            else:
+                current = elapsed
+            update(current_value=min(current, target), current_message="正在%s" % spec["label"])
+            if current >= target:
+                break
+            if elapsed >= timeout:
+                raise RuntimeError("control task timed out")
+            await asyncio.sleep(0.12)
+
+        await control.move("stop")
+        if cancellation.is_set():
+            update(state=ControlTaskState.STOPPED, current_message="任务已停止", result="已停止")
+        else:
+            result = "已完成%s并停止。" % spec["label"]
+            update(
+                completed_steps=len(tasks[task_id].steps),
+                current_value=target,
+                state=ControlTaskState.COMPLETED,
+                current_message=result,
+                result=result,
+            )
+    except Exception as exc:
+        logger.warning("Control task failed", exc_info=exc)
+        try:
+            await control.move("stop")
+        except Exception:
+            logger.exception("Failed to stop failed control task")
+        update(
+            state=ControlTaskState.FAILED,
+            current_message="任务执行失败",
+            result="任务执行失败，请检查小车服务。",
+        )
 
 
 def _casual_reply(message: str) -> str:

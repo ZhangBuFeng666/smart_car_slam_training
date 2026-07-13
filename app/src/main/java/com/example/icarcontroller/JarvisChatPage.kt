@@ -122,6 +122,7 @@ class JarvisChatPage(
                     is JarvisChatItem.UserMessage -> bubble(item.text, Gravity.END, palette.accentSoft, palette.accent)
                     is JarvisChatItem.AssistantMessage -> bubble(item.text, Gravity.START, palette.surface, palette.border)
                     is JarvisChatItem.PlanCard -> planCard(item.plan)
+                    is JarvisChatItem.ControlTaskCard -> controlTaskCard(item.task)
                     is JarvisChatItem.ProgressCard -> progressCard(item.mission, item.timeline)
                     is JarvisChatItem.ReportCard -> reportCard(item.report)
                     is JarvisChatItem.ErrorMessage -> errorCard(item.title, item.detail)
@@ -151,7 +152,11 @@ class JarvisChatPage(
                 result.fold(
                     onSuccess = { response ->
                         val plan = response.plan
-                        if (plan == null) {
+                        val controlTask = response.controlTask
+                        if (controlTask != null) {
+                            state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskReady(controlTask))
+                            onStatus("Jarvis 控制任务待启动")
+                        } else if (plan == null) {
                             state = JarvisReducer.reduce(state, JarvisEvent.ChatReply(response.reply))
                             onStatus("Jarvis")
                         } else {
@@ -294,6 +299,99 @@ class JarvisChatPage(
                 input.setSelection(input.text.length)
             }, LayoutParams(0, dp(44), 1f).apply { setMargins(dp(8), 0, 0, 0) })
         }, lp(top = 12))
+    }
+
+    private fun controlTaskCard(task: JarvisControlTask): LinearLayout =
+        card("控制任务", task.state.name, controlTaskAccent(task.state)).apply {
+            addView(TextView(context).apply {
+                text = task.title
+                setTextColor(color(palette.textPrimary))
+                textSize = 15f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }, lp(top = 8))
+
+            if (task.targetValue > 0.0) {
+                addView(body("%.2f / %.2f %s".format(task.currentValue, task.targetValue, task.unit)), lp(top = 6))
+            }
+            addView(LinearLayout(context).apply {
+                orientation = VERTICAL
+                task.steps.forEachIndexed { index, step ->
+                    addView(TextView(context).apply {
+                        text = when {
+                            index < task.completedSteps -> "✓ $step"
+                            index == task.completedSteps && task.state in setOf(
+                                JarvisControlTaskState.STARTING,
+                                JarvisControlTaskState.RUNNING
+                            ) -> "● $step"
+                            else -> "○ $step"
+                        }
+                        setTextColor(color(if (index < task.completedSteps) successAccent() else palette.textSecondary))
+                        textSize = 12f
+                        setPadding(0, dp(4), 0, 0)
+                    })
+                }
+            }, lp(top = 8))
+            addView(body(task.currentMessage), lp(top = 8))
+            addView(LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                addView(outlineButton("停止") { stopControlTask(task.id) }, LayoutParams(0, dp(44), 1f))
+                addView(primaryButton(
+                    if (task.state == JarvisControlTaskState.STOPPED) "继续" else "启动"
+                ) { startControlTask(task.id) }, LayoutParams(0, dp(44), 1f).apply {
+                    setMargins(dp(8), 0, 0, 0)
+                })
+            }, lp(top = 12))
+        }
+
+    private fun startControlTask(taskId: String) {
+        val savedToken = saveToken()
+        executor.execute {
+            val api = JarvisApi(host, savedToken)
+            val result = runCatching { api.startControlTask(taskId) }
+            runOnUiThread {
+                result.onSuccess {
+                    state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskUpdated(it))
+                    render()
+                    pollControlTask(taskId)
+                }.onFailure { appendError(it.message ?: "控制任务启动失败") }
+            }
+        }
+    }
+
+    private fun pollControlTask(taskId: String) {
+        val savedToken = saveToken()
+        executor.execute {
+            val api = JarvisApi(host, savedToken)
+            while (true) {
+                val task = runCatching { api.getControlTask(taskId) }.getOrElse {
+                    runOnUiThread { appendError(it.message ?: "控制任务进度读取失败") }
+                    return@execute
+                }
+                runOnUiThread {
+                    state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskUpdated(task))
+                    render()
+                }
+                if (task.state in setOf(
+                        JarvisControlTaskState.COMPLETED,
+                        JarvisControlTaskState.STOPPED,
+                        JarvisControlTaskState.FAILED
+                    )) return@execute
+                Thread.sleep(500)
+            }
+        }
+    }
+
+    private fun stopControlTask(taskId: String) {
+        val savedToken = saveToken()
+        executor.execute {
+            val result = runCatching { JarvisApi(host, savedToken).stopControlTask(taskId) }
+            runOnUiThread {
+                result.onSuccess {
+                    state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskUpdated(it))
+                    render()
+                }.onFailure { appendError(it.message ?: "控制任务停止失败") }
+            }
+        }
     }
 
     private fun progressCard(mission: JarvisMission, timeline: List<JarvisTimelineEntry>): LinearLayout =
@@ -454,6 +552,13 @@ class JarvisChatPage(
 
     private fun successAccent(): String =
         if (themeMode == ParkingThemeMode.LIGHT) "#2F8F5B" else "#B8C878"
+
+    private fun controlTaskAccent(state: JarvisControlTaskState): String = when (state) {
+        JarvisControlTaskState.COMPLETED -> successAccent()
+        JarvisControlTaskState.FAILED -> palette.danger
+        JarvisControlTaskState.STOPPED -> warningAccent()
+        else -> palette.accentText
+    }
 
     private fun warningAccent(): String =
         if (themeMode == ParkingThemeMode.LIGHT) "#A87516" else "#D6B05D"

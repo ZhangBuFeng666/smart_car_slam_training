@@ -74,6 +74,14 @@ class MotionWatchdogTest(unittest.TestCase):
 
 
 class MotionBridgeRuntimeTest(unittest.TestCase):
+    def test_odometry_integrates_measured_linear_velocity(self):
+        tracker = motion_bridge.OdometryTracker(clock=lambda: 0.0)
+
+        tracker.update(0.2, 0.0, 0.0, now=10.0)
+        tracker.update(0.2, 0.0, 0.0, now=12.5)
+
+        self.assertAlmostEqual(0.5, tracker.snapshot()["distance_m"], places=3)
+
     def test_handle_line_publishes_immediately_and_acknowledges_sequence(self):
         runtime_type = self.required("MotionBridgeRuntime")
         published = []
@@ -87,6 +95,7 @@ class MotionBridgeRuntimeTest(unittest.TestCase):
         self.assertEqual(12, acknowledgement["sequence"])
         self.assertEqual("front", acknowledgement["direction"])
         self.assertEqual(4.0, acknowledgement["bridge_latency_ms"])
+        self.assertIn("distance_m", acknowledgement)
 
     def test_poll_watchdog_publishes_zero_velocity(self):
         runtime_type = self.required("MotionBridgeRuntime")

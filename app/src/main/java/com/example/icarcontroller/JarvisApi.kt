@@ -9,7 +9,8 @@ import java.net.URLEncoder
 
 data class JarvisChatResponse(
     val reply: String,
-    val plan: JarvisMissionPlan?
+    val plan: JarvisMissionPlan?,
+    val controlTask: JarvisControlTask?
 )
 
 class JarvisApi @JvmOverloads constructor(
@@ -36,8 +37,18 @@ class JarvisApi @JvmOverloads constructor(
             .put("context", context)
         val response = request("POST", "$baseUrl/api/v1/chat", body)
         val plan = if (response.isNull("plan")) null else JarvisJson.parsePlan(response.getJSONObject("plan"))
-        return JarvisChatResponse(response.optString("reply"), plan)
+        val controlTask = response.optJSONObject("control_task")?.let(JarvisJson::parseControlTask)
+        return JarvisChatResponse(response.optString("reply"), plan, controlTask)
     }
+
+    fun getControlTask(taskId: String): JarvisControlTask =
+        JarvisJson.parseControlTask(request("GET", "$baseUrl/api/v1/control-tasks/${encode(taskId)}"))
+
+    fun startControlTask(taskId: String): JarvisControlTask =
+        JarvisJson.parseControlTask(request("POST", "$baseUrl/api/v1/control-tasks/${encode(taskId)}/start"))
+
+    fun stopControlTask(taskId: String): JarvisControlTask =
+        JarvisJson.parseControlTask(request("POST", "$baseUrl/api/v1/control-tasks/${encode(taskId)}/stop"))
 
     fun createMission(plan: JarvisMissionPlan): JarvisMission {
         val response = request(

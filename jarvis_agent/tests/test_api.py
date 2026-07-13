@@ -51,6 +51,10 @@ class FakeControl:
         self.calls.append(("stop_all", None))
         return {"stopped": "all"}
 
+    async def move(self, direction, speed=0.2, turn=0.65):
+        self.calls.append(("move", direction, speed, turn))
+        return {"ok": True, "direction": direction}
+
 
 def client(tmp_path):
     control = FakeControl()
@@ -187,6 +191,34 @@ def test_chat_directly_starts_follow_and_warning(tmp_path):
         ("start", "base"), ("start", "lidar"), ("start", "follow"),
         ("start", "base"), ("start", "lidar"), ("start", "warning"),
     ]
+
+
+def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
+    test_client, control = client(tmp_path)
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "前进0.2秒", "context": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"reply": "已完成前进并停止。", "plan": None}
+    assert control.calls[0][0:2] == ("move", "front")
+    assert control.calls[-1][0:2] == ("move", "stop")
+
+
+def test_chat_stop_command_stops_immediately(tmp_path):
+    test_client, control = client(tmp_path)
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "停止移动", "context": {}},
+    )
+
+    assert response.json() == {"reply": "小车已停止。", "plan": None}
+    assert control.calls == [("move", "stop", 0.2, 0.65)]
 
 
 def test_chat_falls_back_when_model_returns_invalid_plan(tmp_path):

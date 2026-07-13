@@ -1,5 +1,5 @@
 from typing import Any, Dict
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -32,6 +32,12 @@ class ControlClient:
 
     async def emergency_stop(self) -> Dict[str, Any]:
         return await self._get("/stop/all")
+
+    async def move(
+        self, direction: str, speed: float = 0.2, turn: float = 0.65
+    ) -> Dict[str, Any]:
+        query = urlencode({"speed": speed, "turn": turn})
+        return await self._get("/move/%s?%s" % (quote(direction, safe=""), query))
 
     async def _get(self, path: str) -> Dict[str, Any]:
         return await self._request("GET", path)

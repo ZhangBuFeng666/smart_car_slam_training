@@ -1,5 +1,7 @@
 import secrets
 import logging
+import asyncio
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -103,6 +105,30 @@ def create_app(
                 logger.warning("Model returned invalid plan; falling back to clarification", exc_info=exc)
                 plan = _fallback_clarification_plan(request.message)
             return ChatResponse(reply="Plan ready for confirmation.", plan=plan)
+
+        motion_command = _direct_motion_command(request.message)
+        if motion_command is not None:
+            direction, label, duration = motion_command
+            if direction == "stop":
+                await control.move("stop")
+                return ChatResponse(reply="小车已停止。", plan=None)
+            try:
+                deadline = asyncio.get_running_loop().time() + duration
+                while True:
+                    await control.move(direction)
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(0.15, remaining))
+                return ChatResponse(reply="已完成%s并停止。" % label, plan=None)
+            except Exception as exc:
+                logger.warning("Direct motion command failed", exc_info=exc)
+                return ChatResponse(reply="小车%s失败，请检查控制服务。" % label, plan=None)
+            finally:
+                try:
+                    await control.move("stop")
+                except Exception:
+                    logger.exception("Failed to stop after direct motion command")
 
         direct_command = _direct_task_command(request.message)
         if direct_command is not None:
@@ -256,6 +282,27 @@ def _direct_task_command(message: str):
     for aliases, task, label in features:
         if any(alias in text for alias in aliases):
             return task, label, start and not stop
+    return None
+
+
+def _direct_motion_command(message: str):
+    text = message.strip().lower()
+    if any(word in text for word in ("停止移动", "立即停止", "停车", "stop moving")):
+        return "stop", "停止", 0.0
+
+    motions = (
+        (("向前", "前进", "forward"), "front", "前进"),
+        (("向后", "后退", "backward"), "back", "后退"),
+        (("左移", "向左移动", "move left"), "left", "左移"),
+        (("右移", "向右移动", "move right"), "right", "右移"),
+        (("左转", "turn left"), "turn_left", "左转"),
+        (("右转", "turn right"), "turn_right", "右转"),
+    )
+    for aliases, direction, label in motions:
+        if any(alias in text for alias in aliases):
+            match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|s|seconds?)", text)
+            duration = float(match.group(1)) if match else 0.8
+            return direction, label, max(0.2, min(duration, 3.0))
     return None
 
 

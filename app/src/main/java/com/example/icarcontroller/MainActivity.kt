@@ -74,6 +74,7 @@ class MainActivity : Activity() {
     private lateinit var navViews: Map<String, TextView>
     private lateinit var parkingThemeStore: ParkingThemeStore
     private lateinit var jarvisCredentials: JarvisCredentials
+    private lateinit var jarvisConversationController: JarvisConversationController
 
     private var hostInput: EditText? = null
     private var portInput: EditText? = null
@@ -127,6 +128,7 @@ class MainActivity : Activity() {
         parkingThemeMode = parkingThemeStore.load()
         jarvisCredentials = JarvisCredentials(this)
         jarvisToken = jarvisCredentials.loadToken()
+        jarvisConversationController = JarvisConversationController(this)
 
         pageHost = findViewById(R.id.pageHost)
         pageContent = findViewById(R.id.pageContent)
@@ -400,6 +402,8 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         if (fullscreenDriveOverlay != null || fullscreenDrivePending) {
             exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
+        } else if (jarvisChatPage?.handleBack() == true) {
+            return
         } else {
             super.onBackPressed()
         }
@@ -446,6 +450,7 @@ class MainActivity : Activity() {
             host = currentHost,
             themeMode = parkingThemeMode,
             executor = commandExecutor,
+            conversations = jarvisConversationController,
             onStatus = { status -> setStatus(status) },
             onEmergencyStop = {
                 sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)

@@ -93,7 +93,21 @@ data class JarvisReport(
 )
 
 enum class JarvisControlTaskState {
-    DRAFT, STARTING, RUNNING, COMPLETED, STOPPED, FAILED
+    DRAFT, PREPARING, READY, PREPARATION_FAILED, STARTING, RUNNING, COMPLETED, STOPPED, FAILED
+}
+
+enum class JarvisTaskPrimaryAction {
+    NONE, START, RETRY, CONTINUE
+}
+
+object JarvisTaskActions {
+    @JvmStatic
+    fun primaryFor(state: JarvisControlTaskState): JarvisTaskPrimaryAction = when (state) {
+        JarvisControlTaskState.READY -> JarvisTaskPrimaryAction.START
+        JarvisControlTaskState.PREPARATION_FAILED -> JarvisTaskPrimaryAction.RETRY
+        JarvisControlTaskState.STOPPED -> JarvisTaskPrimaryAction.CONTINUE
+        else -> JarvisTaskPrimaryAction.NONE
+    }
 }
 
 data class JarvisControlTask(
@@ -114,6 +128,7 @@ class JarvisProtocolException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
 
 object JarvisJson {
+    @JvmStatic
     fun parseControlTask(obj: JSONObject): JarvisControlTask = wrap {
         JarvisControlTask(
             id = requiredString(obj, "id"),

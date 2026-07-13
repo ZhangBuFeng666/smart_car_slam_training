@@ -47,6 +47,9 @@ class JarvisApi @JvmOverloads constructor(
     fun startControlTask(taskId: String): JarvisControlTask =
         JarvisJson.parseControlTask(request("POST", "$baseUrl/api/v1/control-tasks/${encode(taskId)}/start"))
 
+    fun prepareControlTask(taskId: String): JarvisControlTask =
+        JarvisJson.parseControlTask(request("POST", "$baseUrl/api/v1/control-tasks/${encode(taskId)}/prepare"))
+
     fun stopControlTask(taskId: String): JarvisControlTask =
         JarvisJson.parseControlTask(request("POST", "$baseUrl/api/v1/control-tasks/${encode(taskId)}/stop"))
 

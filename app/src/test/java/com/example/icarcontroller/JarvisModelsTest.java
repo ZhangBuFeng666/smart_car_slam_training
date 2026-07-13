@@ -1,6 +1,7 @@
 package com.example.icarcontroller;
 
 import org.junit.Test;
+import org.json.JSONObject;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -70,6 +71,33 @@ public class JarvisModelsTest {
                 api.missionUrl("mission-001")
         );
         assertEquals("Bearer test-token", api.authorizationHeader());
+    }
+
+    @Test
+    public void parsesReadyControlTaskAndEnablesStart() throws Exception {
+        JarvisControlTask task = JarvisJson.parseControlTask(new JSONObject("{"
+                + "\"id\":\"task-1\","
+                + "\"title\":\"启动摄像头\","
+                + "\"kind\":\"feature\","
+                + "\"state\":\"READY\","
+                + "\"steps\":[\"检查服务\",\"启动摄像头\"],"
+                + "\"completed_steps\":1,"
+                + "\"current_message\":\"准备就绪，等待启动。\","
+                + "\"current_value\":0,"
+                + "\"target_value\":0,"
+                + "\"unit\":\"\""
+                + "}"));
+
+        assertEquals(JarvisControlTaskState.READY, task.getState());
+        assertEquals(JarvisTaskPrimaryAction.START, JarvisTaskActions.primaryFor(task.getState()));
+        assertEquals(
+                JarvisTaskPrimaryAction.RETRY,
+                JarvisTaskActions.primaryFor(JarvisControlTaskState.PREPARATION_FAILED)
+        );
+        assertEquals(
+                JarvisTaskPrimaryAction.NONE,
+                JarvisTaskActions.primaryFor(JarvisControlTaskState.PREPARING)
+        );
     }
 
     @Test(expected = JarvisProtocolException.class)

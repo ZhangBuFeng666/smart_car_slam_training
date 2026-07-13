@@ -155,7 +155,8 @@ class JarvisChatPage(
                         val controlTask = response.controlTask
                         if (controlTask != null) {
                             state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskReady(controlTask))
-                            onStatus("Jarvis 控制任务待启动")
+                            onStatus("Jarvis 正在准备控制任务")
+                            pollControlTask(controlTask.id)
                         } else if (plan == null) {
                             state = JarvisReducer.reduce(state, JarvisEvent.ChatReply(response.reply))
                             onStatus("Jarvis")
@@ -320,6 +321,7 @@ class JarvisChatPage(
                         text = when {
                             index < task.completedSteps -> "✓ $step"
                             index == task.completedSteps && task.state in setOf(
+                                JarvisControlTaskState.PREPARING,
                                 JarvisControlTaskState.STARTING,
                                 JarvisControlTaskState.RUNNING
                             ) -> "● $step"
@@ -332,16 +334,29 @@ class JarvisChatPage(
                 }
             }, lp(top = 8))
             addView(body(task.currentMessage), lp(top = 8))
-            addView(LinearLayout(context).apply {
-                orientation = HORIZONTAL
-                addView(outlineButton("停止") { stopControlTask(task.id) }, LayoutParams(0, dp(44), 1f))
-                addView(primaryButton(
-                    if (task.state == JarvisControlTaskState.STOPPED) "继续" else "启动"
-                ) { startControlTask(task.id) }, LayoutParams(0, dp(44), 1f).apply {
-                    setMargins(dp(8), 0, 0, 0)
-                })
-            }, lp(top = 12))
+            if (task.state !in setOf(JarvisControlTaskState.COMPLETED, JarvisControlTaskState.FAILED)) {
+                addView(LinearLayout(context).apply {
+                    orientation = HORIZONTAL
+                    addView(outlineButton("停止") { stopControlTask(task.id) }, LayoutParams(0, dp(44), 1f))
+                    when (JarvisTaskActions.primaryFor(task.state)) {
+                        JarvisTaskPrimaryAction.START -> addTaskPrimary("启动", task.id, ::startControlTask)
+                        JarvisTaskPrimaryAction.RETRY -> addTaskPrimary("重试", task.id, ::prepareControlTask)
+                        JarvisTaskPrimaryAction.CONTINUE -> addTaskPrimary("继续", task.id, ::prepareControlTask)
+                        JarvisTaskPrimaryAction.NONE -> Unit
+                    }
+                }, lp(top = 12))
+            }
         }
+
+    private fun LinearLayout.addTaskPrimary(
+        label: String,
+        taskId: String,
+        action: (String) -> Unit
+    ) {
+        addView(primaryButton(label) { action(taskId) }, LayoutParams(0, dp(44), 1f).apply {
+            setMargins(dp(8), 0, 0, 0)
+        })
+    }
 
     private fun startControlTask(taskId: String) {
         val savedToken = saveToken()
@@ -354,6 +369,20 @@ class JarvisChatPage(
                     render()
                     pollControlTask(taskId)
                 }.onFailure { appendError(it.message ?: "控制任务启动失败") }
+            }
+        }
+    }
+
+    private fun prepareControlTask(taskId: String) {
+        val savedToken = saveToken()
+        executor.execute {
+            val result = runCatching { JarvisApi(host, savedToken).prepareControlTask(taskId) }
+            runOnUiThread {
+                result.onSuccess {
+                    state = JarvisReducer.reduce(state, JarvisEvent.ControlTaskUpdated(it))
+                    render()
+                    pollControlTask(taskId)
+                }.onFailure { appendError(it.message ?: "控制任务准备失败") }
             }
         }
     }
@@ -372,10 +401,12 @@ class JarvisChatPage(
                     render()
                 }
                 if (task.state in setOf(
-                        JarvisControlTaskState.COMPLETED,
-                        JarvisControlTaskState.STOPPED,
-                        JarvisControlTaskState.FAILED
-                    )) return@execute
+                    JarvisControlTaskState.COMPLETED,
+                    JarvisControlTaskState.STOPPED,
+                    JarvisControlTaskState.FAILED,
+                    JarvisControlTaskState.READY,
+                    JarvisControlTaskState.PREPARATION_FAILED
+                )) return@execute
                 Thread.sleep(500)
             }
         }
@@ -555,7 +586,9 @@ class JarvisChatPage(
 
     private fun controlTaskAccent(state: JarvisControlTaskState): String = when (state) {
         JarvisControlTaskState.COMPLETED -> successAccent()
-        JarvisControlTaskState.FAILED -> palette.danger
+        JarvisControlTaskState.FAILED,
+        JarvisControlTaskState.PREPARATION_FAILED -> palette.danger
+        JarvisControlTaskState.READY -> successAccent()
         JarvisControlTaskState.STOPPED -> warningAccent()
         else -> palette.accentText
     }

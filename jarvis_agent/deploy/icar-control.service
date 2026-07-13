@@ -7,9 +7,9 @@ After=docker.service network-online.target
 Type=simple
 User=jetson
 WorkingDirectory=/home/jetson/icar_app_server
-ExecStartPre=-/usr/bin/docker start 8b98
-ExecStart=/usr/bin/python3 /home/jetson/icar_app_server/server.py --container 8b98 --host 0.0.0.0 --port 8000
-ExecStopPost=-/usr/bin/docker stop 8b98
+ExecStartPre=-/usr/bin/docker start icar-runtime
+ExecStart=/usr/bin/python3 /home/jetson/icar_app_server/server.py --container icar-runtime --host 0.0.0.0 --port 8000
+ExecStopPost=-/usr/bin/docker stop icar-runtime
 Restart=on-failure
 RestartSec=3
 

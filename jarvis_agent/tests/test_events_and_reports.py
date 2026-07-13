@@ -101,6 +101,22 @@ def test_risk_event_creates_pending_decision_timeline(tmp_path):
     assert timeline[-1].metadata["decision"] == "pause_or_continue"
 
 
+def test_pavement_defect_requires_user_decision(tmp_path):
+    repo = Repository(tmp_path / "jarvis.db")
+    repo.initialize()
+    mission = repo.create_mission(sample_plan())
+    adapter = EventAdapter(repo)
+
+    result = adapter.process(
+        sample_event(mission.id, event_type="pavement_defect", label="道面坑洞")
+    )
+
+    assert result.accepted is True
+    assert result.severity == "MEDIUM"
+    assert result.decision_request is not None
+    assert repo.list_timeline(mission.id)[-1].kind == "decision_required"
+
+
 def test_report_contains_timeline_events_and_decisions(tmp_path):
     repo = Repository(tmp_path / "jarvis.db")
     repo.initialize()

@@ -1,7 +1,41 @@
 {
   "version": "v1",
-  "actions": ["CHECK_STATUS", "START_TASK", "STOP_TASK", "STOP_ALL", "RECORD_EVENT", "ASK_USER", "GENERATE_REPORT"],
-  "mission_states": ["DRAFT", "WAITING_CONFIRMATION", "RUNNING", "PAUSED", "FAILED", "CANCELLED", "COMPLETED"],
+  "actions": [
+    "CHECK_STATUS",
+    "START_TASK",
+    "STOP_TASK",
+    "STOP_ALL",
+    "RECORD_EVENT",
+    "ASK_USER",
+    "GENERATE_REPORT",
+    "SET_INITIAL_POSE",
+    "SET_NAV_GOAL"
+  ],
+  "mission_states": [
+    "DRAFT",
+    "WAITING_CONFIRMATION",
+    "RUNNING",
+    "PAUSED",
+    "FAILED",
+    "CANCELLED",
+    "COMPLETED"
+  ],
   "decision_types": ["continue", "ignore", "pause", "finish"],
-  "allowed_tasks": ["base", "lidar", "avoidance", "follow", "warning", "camera", "hsv", "color_track"]
+  "allowed_tasks": [
+    "base",
+    "lidar",
+    "avoidance",
+    "follow",
+    "warning",
+    "camera",
+    "hsv",
+    "color_track",
+    "map_gmapping",
+    "map_display",
+    "map_save",
+    "nav_laser",
+    "nav_display",
+    "nav_dwa",
+    "nav_teb"
+  ]
 }

@@ -189,6 +189,12 @@ def _normalize_step_payload(step: Dict[str, Any]) -> Dict[str, Any]:
         Action.GENERATE_REPORT.value,
     }:
         normalized["arguments"] = {}
+    elif action in {Action.SET_INITIAL_POSE.value, Action.SET_NAV_GOAL.value}:
+        normalized["arguments"] = {
+            "x": float(step.get("x", 0.0)),
+            "y": float(step.get("y", 0.0)),
+            "yaw": float(step.get("yaw", 0.0)),
+        }
     elif action == Action.ASK_USER.value:
         normalized["arguments"] = {"question": step.get("question", "")}
     elif action == Action.RECORD_EVENT.value:

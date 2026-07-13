@@ -81,7 +81,7 @@ class MainActivity : Activity() {
     private var txtDriveState: TextView? = null
     private var txtLog: TextView? = null
     private var vehicleStage: Vehicle3DStageView? = null
-    private var parkingVisionView: ParkingVisionView? = null
+    private var visionCameraPanel: VisionCameraPanel? = null
     private var driveCameraPanel: DriveCameraPanel? = null
     private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
     private var fullscreenDrivePending = false
@@ -178,6 +178,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         releaseDriveCameraPanel()
+        releaseVisionCameraPanel()
         vehicleStage?.destroy()
         vehicleStage = null
         stopMove()
@@ -190,9 +191,12 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         vehicleStage?.onHostResume()
-        parkingVisionView?.setActive(true)
         if (selectedPage == "drive") {
             driveCameraPanel?.start(api().cameraStreamUrl())
+        }
+        if (selectedPage == "vision") {
+            visionCameraPanel?.start(api().cameraStreamUrl())
+            refreshVisionPerception()
         }
     }
 
@@ -200,8 +204,8 @@ class MainActivity : Activity() {
         exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         forceStopForExit(DriveExitEvent.APP_PAUSE)
         driveCameraPanel?.stop()
+        visionCameraPanel?.stop()
         vehicleStage?.onHostPause()
-        parkingVisionView?.setActive(false)
         super.onPause()
     }
 
@@ -209,6 +213,7 @@ class MainActivity : Activity() {
         exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
         releaseDriveCameraPanel()
+        releaseVisionCameraPanel()
         saveConnectionInputs()
         selectedPage = key
         currentDirection = null
@@ -219,7 +224,7 @@ class MainActivity : Activity() {
         driveSpeedSeekBar = null
         vehicleStage?.destroy()
         vehicleStage = null
-        parkingVisionView = null
+        visionCameraPanel = null
         homeConnectionText = null
         pageStatusText = null
         hostInput = null
@@ -257,6 +262,16 @@ class MainActivity : Activity() {
     private fun releaseDriveCameraPanel() {
         driveCameraPanel?.release()
         driveCameraPanel = null
+    }
+
+    private fun releaseVisionCameraPanel() {
+        visionCameraPanel?.release()
+        visionCameraPanel = null
+    }
+
+    private fun refreshVisionPerception() {
+        val snapshot = VisionMockDataSource.snapshot(isVehicleConnected)
+        visionCameraPanel?.renderPerception(snapshot)
     }
 
     private fun enterFullscreenDrive() {
@@ -461,15 +476,16 @@ class MainActivity : Activity() {
     }
 
     private fun renderVision() {
+        val perception = VisionMockDataSource.snapshot(isVehicleConnected)
         pageContent.addView(parkingPageHeader(
             kicker = "B2 / VISION REVIEW",
             title = "停车视觉",
-            subtitle = "识别车位编号、占用状态、车辆颜色和禁停标志。",
-            status = "模型训练中"
+            subtitle = "实时相机预览与检测框，YOLO 接入后替换 Mock 数据源。",
+            status = perception.metrics.statusLabel
         ))
         pageContent.addView(parkingVisionSurface())
-        pageContent.addView(parkingVisionSummary())
-        pageContent.addView(parkingVisionClassRail())
+        pageContent.addView(parkingVisionSummary(perception.metrics))
+        pageContent.addView(parkingVisionClassRail(perception.classLabels))
     }
 
     private fun renderNavigation() {
@@ -1658,14 +1674,11 @@ class MainActivity : Activity() {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
         layoutParams = matchWrapParams(bottom = 12)
-        addView(ParkingVisionView(this@MainActivity).apply {
-            parkingVisionView = this
-            setPalette(palette)
-            elevation = dp(3).toFloat()
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(InteractionSpec.parkingVisionStageHeightDp())
-        ))
+        visionCameraPanel = VisionCameraPanel(this@MainActivity, palette).also { panel ->
+            panel.renderPerception(VisionMockDataSource.snapshot(isVehicleConnected))
+            panel.start(api().cameraStreamUrl())
+            addView(panel)
+        }
         val actions = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(parkingPrimaryButton("启动相机") {
@@ -1680,25 +1693,31 @@ class MainActivity : Activity() {
         addView(actions, matchWrapParams(top = 9))
     }
 
-    private fun parkingVisionSummary(): LinearLayout = parkingMetricBand(listOf(
-        "12" to "可见车位",
-        "07" to "已占用",
-        "01" to "禁停提示"
+    private fun parkingVisionSummary(metrics: VisionMetrics): LinearLayout = parkingMetricBand(listOf(
+        metrics.visibleSlots.toString().padStart(2, '0') to "可见目标",
+        metrics.occupiedSlots.toString().padStart(2, '0') to "占用车位",
+        metrics.alertCount.toString().padStart(2, '0') to "告警"
     ))
 
-    private fun parkingVisionClassRail(): LinearLayout = LinearLayout(this).apply {
+    private fun parkingVisionClassRail(labels: List<String>): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         layoutParams = matchWrapParams(bottom = 12)
-        addView(parkingSectionTitle("识别类别", "当前为界面预览，模型结果接入后实时更新"))
+        addView(parkingSectionTitle("识别类别", "当前来自 Mock 数据源，YOLO 推理结果接入后实时更新"))
         val scroll = HorizontalScrollView(this@MainActivity).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("车位编号", "占用状态", "车辆颜色", "禁停标志", "行人", "烟雾").forEach { label ->
-            row.addView(parkingChip(label), LinearLayout.LayoutParams(
+        if (labels.isEmpty()) {
+            row.addView(parkingChip("等待检测"), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
             ).apply { setMargins(0, dp(9), dp(8), 0) })
+        } else {
+            labels.forEach { label ->
+                row.addView(parkingChip(label), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
+                ).apply { setMargins(0, dp(9), dp(8), 0) })
+            }
         }
         scroll.addView(row)
         addView(scroll)

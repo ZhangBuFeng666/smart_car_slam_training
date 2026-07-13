@@ -29,6 +29,14 @@ class FakeControl:
         self.calls.append(("stop_all", None))
         return {"stopped": "all"}
 
+    async def set_initial_pose(self, x, y, yaw):
+        self.calls.append(("initial_pose", (x, y, yaw)))
+        return {"published": True}
+
+    async def set_nav_goal(self, x, y, yaw):
+        self.calls.append(("nav_goal", (x, y, yaw)))
+        return {"published": True}
+
 
 def plan_with(*steps):
     return MissionPlan(
@@ -120,4 +128,23 @@ async def test_internal_actions_do_not_call_control_service(repo):
         "question",
         "report_deferred",
         "running",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_navigation_pose_actions_call_control_service(repo):
+    control = FakeControl()
+    mission = repo.create_mission(
+        plan_with(
+            (Action.SET_INITIAL_POSE, {"x": 0.0, "y": 0.0, "yaw": 0.0}),
+            (Action.SET_NAV_GOAL, {"x": 2.0, "y": 1.0, "yaw": 1.57}),
+        )
+    )
+    engine = MissionEngine(repo, control)
+
+    await engine.confirm(mission.id)
+
+    assert control.calls == [
+        ("initial_pose", (0.0, 0.0, 0.0)),
+        ("nav_goal", (2.0, 1.0, 1.57)),
     ]

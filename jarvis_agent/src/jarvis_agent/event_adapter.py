@@ -10,6 +10,14 @@ SEVERITY_BY_EVENT_TYPE = {
     "standing_water": "HIGH",
     "obstacle": "MEDIUM",
     "illegal_parking": "MEDIUM",
+    "pavement_defect": "MEDIUM",
+}
+
+_DECISION_EVENT_TYPES = {
+    "obstacle",
+    "standing_water",
+    "illegal_parking",
+    "pavement_defect",
 }
 
 
@@ -61,7 +69,7 @@ class EventAdapter:
         )
 
         decision = None
-        if event.event_type in {"obstacle", "standing_water", "illegal_parking"}:
+        if event.event_type in _DECISION_EVENT_TYPES:
             decision = DecisionRequest(
                 decision=DecisionType.PAUSE,
                 event_id=persisted.id,

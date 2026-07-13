@@ -35,6 +35,37 @@ def test_valid_whitelisted_start_task_is_accepted():
     assert validated.steps[0].arguments == {"task": "camera"}
 
 
+@pytest.mark.parametrize(
+    "task",
+    ["map_gmapping", "nav_dwa", "nav_teb"],
+)
+def test_navigation_tasks_are_allowed(task):
+    validated = validate_plan(plan_with(Action.START_TASK, {"task": task}))
+
+    assert validated.steps[0].arguments["task"] == task
+
+
+def test_set_nav_goal_requires_numeric_pose():
+    validated = validate_plan(
+        plan_with(Action.SET_NAV_GOAL, {"x": 1.0, "y": 0.5, "yaw": 0.0})
+    )
+
+    assert validated.steps[0].arguments["yaw"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"x": 1.0, "y": 0.0},
+        {"x": "bad", "y": 0.0, "yaw": 0.0},
+        {"x": 1.0, "y": 0.0, "yaw": 0.0, "extra": 1},
+    ],
+)
+def test_nav_pose_actions_reject_invalid_arguments(arguments):
+    with pytest.raises(PlanValidationError):
+        validate_plan(plan_with(Action.SET_INITIAL_POSE, arguments))
+
+
 @pytest.mark.parametrize("task", ["move", "unknown"])
 def test_unknown_start_task_is_rejected(task):
     with pytest.raises(PlanValidationError, match="allowed task"):
@@ -93,10 +124,15 @@ def test_safe_chinese_question_is_accepted():
 
 
 @pytest.mark.parametrize(
-    "action", [Action.START_TASK, Action.STOP_TASK, Action.STOP_ALL]
+    "action", [Action.START_TASK, Action.STOP_TASK, Action.STOP_ALL, Action.SET_NAV_GOAL]
 )
 def test_control_actions_force_confirmation_without_mutating_input(action):
-    arguments = {"task": "camera"} if action != Action.STOP_ALL else {}
+    if action in {Action.SET_INITIAL_POSE, Action.SET_NAV_GOAL}:
+        arguments = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    elif action == Action.STOP_ALL:
+        arguments = {}
+    else:
+        arguments = {"task": "camera"}
     plan = plan_with(action, arguments)
 
     validated = validate_plan(plan)

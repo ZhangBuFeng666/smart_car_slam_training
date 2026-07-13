@@ -83,6 +83,30 @@ class MissionEngine:
                 "report_deferred",
                 "Report generation deferred until finish decision",
             )
+        elif action is Action.SET_INITIAL_POSE:
+            await self.control.set_initial_pose(
+                float(arguments["x"]),
+                float(arguments["y"]),
+                float(arguments["yaw"]),
+            )
+            self.repository.append_timeline(
+                mission_id,
+                "control",
+                "Published initial pose (%.2f, %.2f, %.2f)"
+                % (arguments["x"], arguments["y"], arguments["yaw"]),
+            )
+        elif action is Action.SET_NAV_GOAL:
+            await self.control.set_nav_goal(
+                float(arguments["x"]),
+                float(arguments["y"]),
+                float(arguments["yaw"]),
+            )
+            self.repository.append_timeline(
+                mission_id,
+                "control",
+                "Published navigation goal (%.2f, %.2f, %.2f)"
+                % (arguments["x"], arguments["y"], arguments["yaw"]),
+            )
 
     def _get_mission(self, mission_id: str) -> MissionView:
         mission = self.repository.get_mission(mission_id)

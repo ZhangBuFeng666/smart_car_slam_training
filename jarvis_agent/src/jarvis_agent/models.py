@@ -12,6 +12,8 @@ class Action(str, Enum):
     RECORD_EVENT = "RECORD_EVENT"
     ASK_USER = "ASK_USER"
     GENERATE_REPORT = "GENERATE_REPORT"
+    SET_INITIAL_POSE = "SET_INITIAL_POSE"
+    SET_NAV_GOAL = "SET_NAV_GOAL"
 
 
 class MissionState(str, Enum):

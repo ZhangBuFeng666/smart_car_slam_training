@@ -33,6 +33,12 @@ class ControlClient:
     async def emergency_stop(self) -> Dict[str, Any]:
         return await self._post("/stop/all")
 
+    async def set_initial_pose(self, x: float, y: float, yaw: float) -> Dict[str, Any]:
+        return await self._get(self._navigation_path("initial_pose", x, y, yaw))
+
+    async def set_nav_goal(self, x: float, y: float, yaw: float) -> Dict[str, Any]:
+        return await self._get(self._navigation_path("goal", x, y, yaw))
+
     async def _get(self, path: str) -> Dict[str, Any]:
         return await self._request("GET", path)
 
@@ -51,3 +57,16 @@ class ControlClient:
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise ControlServiceError("control service request failed") from exc
+
+    def _navigation_path(self, kind: str, x: float, y: float, yaw: float) -> str:
+        return "/navigation/%s?x=%s&y=%s&yaw=%s" % (
+            kind,
+            _format_num(x),
+            _format_num(y),
+            _format_num(yaw),
+        )
+
+
+def _format_num(value: float) -> str:
+    text = ("%.2f" % float(value)).rstrip("0").rstrip(".")
+    return text or "0"

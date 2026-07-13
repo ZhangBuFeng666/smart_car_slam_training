@@ -41,9 +41,9 @@ object FeatureCatalog {
 
     @JvmStatic
     fun visionFeatures(): List<FeatureItem> = listOf(
-        FeatureItem("camera", "停车场预览", "接入相机流，显示小车前方通道与车位", "待接入"),
+        FeatureItem("camera", "停车场预览", "接入相机流，显示小车前方通道与车位", "可用"),
         FeatureItem("recognition", "车位识别", "识别车位编号、占用状态和禁停标志", "训练中"),
-        FeatureItem("detection", "异常检测", "显示车辆、行人、烟雾和路障检测框", "训练中"),
+        FeatureItem("detection", "异常检测", "显示车辆、行人、烟雾和路障检测框", "Mock"),
         FeatureItem("tracking", "目标复查", "结合检测结果控制小车靠近目标复查", "待接入")
     )
 

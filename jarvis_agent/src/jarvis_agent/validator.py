@@ -12,6 +12,13 @@ ALLOWED_TASKS = (
     "camera",
     "hsv",
     "color_track",
+    "map_gmapping",
+    "map_display",
+    "map_save",
+    "nav_laser",
+    "nav_display",
+    "nav_dwa",
+    "nav_teb",
 )
 
 
@@ -19,12 +26,19 @@ class PlanValidationError(ValueError):
     pass
 
 
-_CONTROL_ACTIONS = {Action.START_TASK, Action.STOP_TASK, Action.STOP_ALL}
+_CONTROL_ACTIONS = {
+    Action.START_TASK,
+    Action.STOP_TASK,
+    Action.STOP_ALL,
+    Action.SET_INITIAL_POSE,
+    Action.SET_NAV_GOAL,
+}
 _ARGUMENT_FREE_ACTIONS = {
     Action.CHECK_STATUS,
     Action.STOP_ALL,
     Action.GENERATE_REPORT,
 }
+_NAV_POSE_ACTIONS = {Action.SET_INITIAL_POSE, Action.SET_NAV_GOAL}
 _UNSAFE_STRING_MARKERS = ("http://", "https://", "\n", "\r", ";", "&&", "||", "`", "$(")
 
 
@@ -67,6 +81,17 @@ def _validate_record_event(arguments: Dict[str, Any]) -> None:
         raise PlanValidationError("RECORD_EVENT arguments must be strings")
 
 
+def _validate_nav_pose_action(step: MissionStep) -> None:
+    if set(step.arguments) != {"x", "y", "yaw"}:
+        raise PlanValidationError(
+            "%s requires x, y, and yaw arguments" % step.action.value
+        )
+    for key in ("x", "y", "yaw"):
+        value = step.arguments[key]
+        if not isinstance(value, (int, float)):
+            raise PlanValidationError("%s must be numeric" % key)
+
+
 def _validate_ask_user(arguments: Dict[str, Any]) -> None:
     if not arguments:
         return
@@ -91,6 +116,8 @@ def _validate_step(step: MissionStep) -> None:
         _validate_record_event(step.arguments)
     elif step.action == Action.ASK_USER:
         _validate_ask_user(step.arguments)
+    elif step.action in _NAV_POSE_ACTIONS:
+        _validate_nav_pose_action(step)
 
 
 def validate_plan(plan: MissionPlan) -> MissionPlan:

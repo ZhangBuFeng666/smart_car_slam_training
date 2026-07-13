@@ -14,9 +14,15 @@ object JarvisConversationPolicy {
         }
 }
 
-class JarvisConversationController(context: Context) {
-    private val store = JarvisConversationStore(context)
-    private val preferences = context.getSharedPreferences("jarvis_conversation_state", Context.MODE_PRIVATE)
+class JarvisConversationController(
+    context: Context,
+    databaseName: String = "jarvis_conversations.db"
+) {
+    private val store = JarvisConversationStore(context, databaseName)
+    private val preferences = context.getSharedPreferences(
+        "jarvis_conversation_state_$databaseName",
+        Context.MODE_PRIVATE
+    )
     private val states = mutableMapOf<String, JarvisViewState>()
     private var currentId: String = restoreCurrentConversation()
 

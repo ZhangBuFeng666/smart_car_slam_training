@@ -149,6 +149,46 @@ def test_chat_only_plans_when_explicitly_requested(tmp_path):
     assert planner.calls == []
 
 
+def test_chat_directly_starts_avoidance_with_dependencies(tmp_path):
+    test_client, control = client(tmp_path)
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "启动自动避障功能", "context": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"reply": "已成功开启自动避障功能。", "plan": None}
+    assert control.calls == [
+        ("start", "base"),
+        ("start", "lidar"),
+        ("start", "avoidance"),
+    ]
+
+
+def test_chat_directly_starts_follow_and_warning(tmp_path):
+    test_client, control = client(tmp_path)
+
+    follow = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "开启自动跟随", "context": {}},
+    )
+    warning = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "启动自动警卫", "context": {}},
+    )
+
+    assert follow.json()["reply"] == "已成功开启自动跟随功能。"
+    assert warning.json()["reply"] == "已成功开启自动警卫功能。"
+    assert control.calls == [
+        ("start", "base"), ("start", "lidar"), ("start", "follow"),
+        ("start", "base"), ("start", "lidar"), ("start", "warning"),
+    ]
+
+
 def test_chat_falls_back_when_model_returns_invalid_plan(tmp_path):
     control = FakeControl()
     settings = Settings(

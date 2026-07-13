@@ -92,22 +92,41 @@ def create_app(
         dependencies=[Depends(require_auth)],
     )
     async def chat(request: ChatRequest):
-        if not _is_task_request(request.message):
+        if _is_task_request(request.message):
             try:
-                reply = await planner.reply(request.message, request.context)
-            except (AttributeError, ModelTimeoutError, ModelUnavailableError, ModelResponseError):
-                reply = _casual_reply(request.message)
-            return ChatResponse(reply=reply, plan=None)
+                plan = validate_plan(await planner.plan(request.message, request.context))
+            except ModelTimeoutError as exc:
+                raise _http_error(504, "MODEL_TIMEOUT", "Model request timed out") from exc
+            except ModelUnavailableError as exc:
+                raise _http_error(503, "MODEL_UNAVAILABLE", "Model is unavailable") from exc
+            except (ModelResponseError, PlanValidationError) as exc:
+                logger.warning("Model returned invalid plan; falling back to clarification", exc_info=exc)
+                plan = _fallback_clarification_plan(request.message)
+            return ChatResponse(reply="Plan ready for confirmation.", plan=plan)
+
+        direct_command = _direct_task_command(request.message)
+        if direct_command is not None:
+            task, label, start = direct_command
+            try:
+                if start:
+                    if task in {"avoidance", "follow", "warning"}:
+                        await control.start_task("base")
+                        await control.start_task("lidar")
+                    await control.start_task(task)
+                    reply = "已成功开启%s功能。" % label
+                else:
+                    await control.stop_task(task)
+                    reply = "已成功关闭%s功能。" % label
+                return ChatResponse(reply=reply, plan=None)
+            except Exception as exc:
+                logger.warning("Direct control command failed", exc_info=exc)
+                return ChatResponse(reply="%s功能操作失败，请检查小车服务状态。" % label, plan=None)
+
         try:
-            plan = validate_plan(await planner.plan(request.message, request.context))
-        except ModelTimeoutError as exc:
-            raise _http_error(504, "MODEL_TIMEOUT", "Model request timed out") from exc
-        except ModelUnavailableError as exc:
-            raise _http_error(503, "MODEL_UNAVAILABLE", "Model is unavailable") from exc
-        except (ModelResponseError, PlanValidationError) as exc:
-            logger.warning("Model returned invalid plan; falling back to clarification", exc_info=exc)
-            plan = _fallback_clarification_plan(request.message)
-        return ChatResponse(reply="Plan ready for confirmation.", plan=plan)
+            reply = await planner.reply(request.message, request.context)
+        except (AttributeError, ModelTimeoutError, ModelUnavailableError, ModelResponseError):
+            reply = _casual_reply(request.message)
+        return ChatResponse(reply=reply, plan=None)
 
     @app.post("/api/v1/missions", dependencies=[Depends(require_auth)])
     def create_mission(request: MissionCreateRequest):
@@ -215,6 +234,29 @@ def _fallback_clarification_plan(message: str) -> MissionPlan:
 def _is_task_request(message: str) -> bool:
     text = message.strip().lower()
     return "生成计划" in text or "create plan" in text
+
+
+def _direct_task_command(message: str):
+    text = message.strip().lower()
+    start = any(word in text for word in ("启动", "开启", "打开", "start", "enable"))
+    stop = any(word in text for word in ("停止", "关闭", "stop", "disable"))
+    if not start and not stop:
+        return None
+
+    features = (
+        (("自动避障", "避障", "avoidance"), "avoidance", "自动避障"),
+        (("自动跟随", "跟随", "follow"), "follow", "自动跟随"),
+        (("自动警卫", "自动警戒", "警卫", "警戒", "warning"), "warning", "自动警卫"),
+        (("颜色追踪", "颜色跟踪", "color track"), "color_track", "颜色追踪"),
+        (("颜色识别", "hsv"), "hsv", "颜色识别"),
+        (("摄像头", "相机", "camera"), "camera", "摄像头"),
+        (("激光雷达", "雷达", "lidar"), "lidar", "激光雷达"),
+        (("底盘", "base"), "base", "底盘"),
+    )
+    for aliases, task, label in features:
+        if any(alias in text for alias in aliases):
+            return task, label, start and not stop
+    return None
 
 
 def _casual_reply(message: str) -> str:

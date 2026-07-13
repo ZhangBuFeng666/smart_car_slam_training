@@ -1,0 +1,17 @@
+[Unit]
+Description=iCar ROS control HTTP bridge
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/icar_app_server
+ExecStartPre=-/usr/bin/docker start 8b98
+ExecStart=/usr/bin/python3 /home/jetson/icar_app_server/server.py --container 8b98 --host 0.0.0.0 --port 8000
+ExecStopPost=-/usr/bin/docker stop 8b98
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -22,16 +22,16 @@ class ControlClient:
         return await self._get("/status")
 
     async def start_task(self, task: str) -> Dict[str, Any]:
-        return await self._post("/task/%s/start" % quote(task, safe=""))
+        return await self._get("/start/%s" % quote(task, safe=""))
 
     async def stop_task(self, task: str) -> Dict[str, Any]:
-        return await self._post("/task/%s/stop" % quote(task, safe=""))
+        return await self._get("/stop/%s" % quote(task, safe=""))
 
     async def stop_all(self) -> Dict[str, Any]:
-        return await self._post("/stop/all")
+        return await self._get("/stop/all")
 
     async def emergency_stop(self) -> Dict[str, Any]:
-        return await self._post("/stop/all")
+        return await self._get("/stop/all")
 
     async def _get(self, path: str) -> Dict[str, Any]:
         return await self._request("GET", path)

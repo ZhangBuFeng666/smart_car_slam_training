@@ -75,6 +75,32 @@ def create_app(
     control_specs = {}
     control_cancellations = {}
 
+    def begin_preparation(task_id: str):
+        cancellation = threading.Event()
+        control_cancellations[task_id] = cancellation
+        control_tasks[task_id] = control_tasks[task_id].model_copy(
+            update={
+                "state": ControlTaskState.PREPARING,
+                "completed_steps": 0,
+                "current_message": "正在检查小车服务",
+                "result": None,
+            }
+        )
+        threading.Thread(
+            target=lambda: asyncio.run(
+                _prepare_control_task(
+                    task_id,
+                    control,
+                    control_tasks,
+                    control_specs[task_id],
+                    cancellation,
+                )
+            ),
+            name="jarvis-prepare-%s" % task_id[:8],
+            daemon=True,
+        ).start()
+        return control_tasks[task_id]
+
     def require_auth(authorization: str = Header(default="")) -> None:
         expected = "Bearer %s" % settings.jarvis_app_token
         if not settings.jarvis_app_token or not secrets.compare_digest(
@@ -122,7 +148,10 @@ def create_app(
             task, spec = _motion_control_task(motion_command)
             control_tasks[task.id] = task
             control_specs[task.id] = spec
-            return ChatResponse(reply="控制任务已准备，确认后启动。", control_task=task)
+            return ChatResponse(
+                reply="正在完成启动前准备。",
+                control_task=begin_preparation(task.id),
+            )
 
         direct_command = _direct_task_command(request.message)
         if direct_command is not None:
@@ -133,7 +162,10 @@ def create_app(
             view, spec = _feature_control_task(task, label)
             control_tasks[view.id] = view
             control_specs[view.id] = spec
-            return ChatResponse(reply="功能任务已准备，确认后启动。", control_task=view)
+            return ChatResponse(
+                reply="正在完成启动前准备。",
+                control_task=begin_preparation(view.id),
+            )
 
         try:
             reply = await planner.reply(request.message, request.context)
@@ -163,6 +195,8 @@ def create_app(
             raise _http_error(404, "CONTROL_TASK_NOT_FOUND", "Control task not found")
         if task.state in {ControlTaskState.STARTING, ControlTaskState.RUNNING}:
             return task
+        if task.state is not ControlTaskState.READY:
+            raise _http_error(409, "CONTROL_TASK_NOT_READY", "Control task is not ready")
         cancellation = threading.Event()
         control_cancellations[task_id] = cancellation
         control_tasks[task_id] = task.model_copy(
@@ -182,6 +216,24 @@ def create_app(
             daemon=True,
         ).start()
         return control_tasks[task_id]
+
+    @app.post(
+        "/api/v1/control-tasks/{task_id}/prepare",
+        response_model=ControlTaskView,
+        dependencies=[Depends(require_auth)],
+    )
+    async def prepare_control_task(task_id: str):
+        task = control_tasks.get(task_id)
+        if task is None:
+            raise _http_error(404, "CONTROL_TASK_NOT_FOUND", "Control task not found")
+        if task.state is ControlTaskState.PREPARING:
+            return task
+        if task.state not in {
+            ControlTaskState.PREPARATION_FAILED,
+            ControlTaskState.STOPPED,
+        }:
+            raise _http_error(409, "CONTROL_TASK_CANNOT_PREPARE", "Control task cannot be prepared")
+        return begin_preparation(task_id)
 
     @app.post(
         "/api/v1/control-tasks/{task_id}/stop",
@@ -412,23 +464,12 @@ def _feature_control_task(task_name, label):
 
 
 async def _run_control_task(task_id, control, tasks, spec, cancellation):
-    task = tasks[task_id]
-
     def update(**values):
         tasks[task_id] = tasks[task_id].model_copy(update=values)
 
     try:
-        await control.health()
-        update(completed_steps=1, current_message="正在启动底盘驱动")
-        await control.start_task("base")
-        update(completed_steps=2, state=ControlTaskState.RUNNING)
-
         if spec["kind"] == "feature":
-            if spec["dependencies"]:
-                update(current_message="正在启动激光雷达")
-                await control.start_task("lidar")
-                update(completed_steps=3)
-            update(current_message="正在启动%s" % spec["label"])
+            update(state=ControlTaskState.RUNNING, current_message="正在启动%s" % spec["label"])
             start_result = await control.start_task(spec["task"])
             next_step = 4 if spec["dependencies"] else 3
             update(completed_steps=next_step, current_message="正在确认运行状态")
@@ -448,7 +489,7 @@ async def _run_control_task(task_id, control, tasks, spec, cancellation):
             )
             return
 
-        update(current_message="正在%s" % spec["label"])
+        update(state=ControlTaskState.RUNNING, current_message="正在%s" % spec["label"])
         baseline_response = await control.move("stop")
         baseline = float(baseline_response.get("distance_m", 0.0))
         started = asyncio.get_running_loop().time()
@@ -490,6 +531,41 @@ async def _run_control_task(task_id, control, tasks, spec, cancellation):
             state=ControlTaskState.FAILED,
             current_message="任务执行失败",
             result="任务执行失败，请检查小车服务。",
+        )
+
+
+async def _prepare_control_task(task_id, control, tasks, spec, cancellation):
+    def update(**values):
+        tasks[task_id] = tasks[task_id].model_copy(update=values)
+
+    try:
+        await control.health()
+        if cancellation.is_set():
+            return
+        update(completed_steps=1, current_message="正在启动底盘驱动")
+        await control.start_task("base")
+        if cancellation.is_set():
+            return
+        update(completed_steps=2)
+
+        if spec["kind"] == "feature" and spec["dependencies"]:
+            update(current_message="正在启动激光雷达")
+            await control.start_task("lidar")
+            if cancellation.is_set():
+                return
+            update(completed_steps=3)
+
+        update(
+            state=ControlTaskState.READY,
+            current_message="准备就绪，等待启动。",
+            result=None,
+        )
+    except Exception as exc:
+        logger.warning("Control task preparation failed", exc_info=exc)
+        update(
+            state=ControlTaskState.PREPARATION_FAILED,
+            current_message="准备失败",
+            result="启动前准备失败，请检查小车服务后重试。",
         )
 
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -60,6 +61,19 @@ class FakeControl:
         return {"ok": True, "direction": direction}
 
 
+class FailingOnceControl(FakeControl):
+    def __init__(self):
+        super().__init__()
+        self.fail_health = True
+
+    async def health(self):
+        self.calls.append(("health", None))
+        if self.fail_health:
+            self.fail_health = False
+            raise RuntimeError("offline")
+        return {"ok": True}
+
+
 def client(tmp_path):
     control = FakeControl()
     settings = Settings(
@@ -72,6 +86,18 @@ def client(tmp_path):
 
 def auth():
     return {"Authorization": "Bearer test-token"}
+
+
+def wait_for_control_state(test_client, task_id, expected, attempts=100):
+    for _ in range(attempts):
+        status = test_client.get(
+            "/api/v1/control-tasks/%s" % task_id,
+            headers=auth(),
+        ).json()
+        if status["state"] == expected:
+            return status
+        time.sleep(0.01)
+    raise AssertionError("task did not reach %s; last state was %s" % (expected, status["state"]))
 
 
 def sample_plan_json():
@@ -168,18 +194,24 @@ def test_chat_directly_starts_avoidance_with_dependencies(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["reply"] == "功能任务已准备，确认后启动。"
-    assert body["control_task"]["state"] == "DRAFT"
-    assert control.calls == []
+    assert body["reply"] == "正在完成启动前准备。"
+    task_id = body["control_task"]["id"]
+    ready = wait_for_control_state(test_client, task_id, "READY")
+    assert ready["current_message"] == "准备就绪，等待启动。"
+    assert control.calls == [
+        ("health", None),
+        ("start", "base"),
+        ("start", "lidar"),
+    ]
 
     started = test_client.post(
-        "/api/v1/control-tasks/%s/start" % body["control_task"]["id"],
+        "/api/v1/control-tasks/%s/start" % task_id,
         headers=auth(),
     )
     assert started.status_code == 200
     for _ in range(20):
         status = test_client.get(
-            "/api/v1/control-tasks/%s" % body["control_task"]["id"],
+            "/api/v1/control-tasks/%s" % task_id,
             headers=auth(),
         ).json()
         if status["state"] == "COMPLETED":
@@ -210,9 +242,10 @@ def test_chat_directly_starts_follow_and_warning(tmp_path):
         json={"message": "启动自动警卫", "context": {}},
     )
 
-    assert follow.json()["control_task"]["state"] == "DRAFT"
-    assert warning.json()["control_task"]["state"] == "DRAFT"
-    assert control.calls == []
+    wait_for_control_state(test_client, follow.json()["control_task"]["id"], "READY")
+    wait_for_control_state(test_client, warning.json()["control_task"]["id"], "READY")
+    assert ("start", "follow") not in control.calls
+    assert ("start", "warning") not in control.calls
 
 
 def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
@@ -226,17 +259,18 @@ def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["control_task"]["state"] == "DRAFT"
-    assert control.calls == []
+    task_id = body["control_task"]["id"]
+    wait_for_control_state(test_client, task_id, "READY")
+    assert control.calls == [("health", None), ("start", "base")]
 
     test_client.post(
-        "/api/v1/control-tasks/%s/start" % body["control_task"]["id"],
+        "/api/v1/control-tasks/%s/start" % task_id,
         headers=auth(),
     )
     import time
     for _ in range(50):
         status = test_client.get(
-            "/api/v1/control-tasks/%s" % body["control_task"]["id"],
+            "/api/v1/control-tasks/%s" % task_id,
             headers=auth(),
         ).json()
         if status["state"] == "COMPLETED":
@@ -244,6 +278,40 @@ def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):
         time.sleep(0.01)
     assert status["result"] == "已完成前进并停止。"
     assert control.calls[-1][0:2] == ("move", "stop")
+
+
+def test_failed_preparation_blocks_start_and_can_retry(tmp_path):
+    control = FailingOnceControl()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    test_client = TestClient(
+        create_app(settings=settings, planner=FakePlanner(), control=control)
+    )
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "启动摄像头", "context": {}},
+    )
+    task_id = response.json()["control_task"]["id"]
+    failed = wait_for_control_state(test_client, task_id, "PREPARATION_FAILED")
+
+    blocked = test_client.post(
+        "/api/v1/control-tasks/%s/start" % task_id,
+        headers=auth(),
+    )
+    assert blocked.status_code == 409
+    assert failed["current_message"] == "准备失败"
+
+    retry = test_client.post(
+        "/api/v1/control-tasks/%s/prepare" % task_id,
+        headers=auth(),
+    )
+    assert retry.status_code == 200
+    wait_for_control_state(test_client, task_id, "READY")
+    assert ("start", "camera") not in control.calls
 
 
 def test_chat_stop_command_stops_immediately(tmp_path):

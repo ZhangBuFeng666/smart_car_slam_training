@@ -26,6 +26,9 @@ class MissionState(str, Enum):
 
 class ControlTaskState(str, Enum):
     DRAFT = "DRAFT"
+    PREPARING = "PREPARING"
+    READY = "READY"
+    PREPARATION_FAILED = "PREPARATION_FAILED"
     STARTING = "STARTING"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"

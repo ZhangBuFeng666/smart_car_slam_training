@@ -52,18 +52,19 @@ object FeatureCatalog {
         FeatureItem("mapping", "SLAM 建图", "启动 Gmapping，缓慢移动小车扫描环境", "可接入"),
         FeatureItem("save_map", "保存地图", "保存 yahboomcar.pgm 和 yahboomcar.yaml", "可接入"),
         FeatureItem("planning", "路径规划", "Nav2 收到目标点后由 planner_server 生成路线", "可接入"),
-        FeatureItem("auto_nav", "自动导航", "DWA 或 TEB 控制器跟随规划路线行驶", "可接入")
+        FeatureItem("auto_nav", "自动导航", "DWA、TEB 或 A* + RPP 跟随规划路线行驶", "可接入")
     )
 
     @JvmStatic
     fun navigationTasks(): List<RobotTask> = listOf(
-        RobotTask("map_gmapping", "启动建图", "ros2 launch yahboomcar_nav map_gmapping_launch.py", "建图"),
-        RobotTask("map_display", "显示建图地图", "ros2 launch yahboomcar_nav display_map_launch.py", "建图"),
-        RobotTask("map_save", "保存地图", "ros2 launch yahboomcar_nav save_map_launch.py", "建图"),
-        RobotTask("nav_laser", "雷达与底盘", "ros2 launch yahboomcar_nav laser_bringup_launch.py", "导航"),
-        RobotTask("nav_display", "显示导航地图", "ros2 launch yahboomcar_nav display_nav_launch.py", "导航"),
-        RobotTask("nav_dwa", "DWA 导航", "ros2 launch yahboomcar_nav navigation_dwa_launch.py", "导航"),
-        RobotTask("nav_teb", "TEB 导航", "ros2 launch yahboomcar_nav navigation_teb_launch.py", "导航")
+        RobotTask("map_gmapping", "启动建图", "ros2 launch icar_nav map_gmapping_launch.py", "建图"),
+        RobotTask("map_display", "显示建图地图", "ros2 launch icar_nav display_map_launch.py", "建图"),
+        RobotTask("map_save", "保存地图", "ros2 launch icar_nav save_map_launch.py", "建图"),
+        RobotTask("nav_laser", "雷达与底盘", "ros2 launch icar_nav laser_bringup_launch.py", "导航"),
+        RobotTask("nav_display", "显示导航地图", "ros2 launch icar_nav display_nav_launch.py", "导航"),
+        RobotTask("nav_dwa", "DWA 导航", "ros2 launch icar_nav navigation_dwa_launch.py", "导航"),
+        RobotTask("nav_teb", "TEB 导航", "ros2 launch icar_nav navigation_teb_launch.py", "导航"),
+        RobotTask("nav_astar_rpp", "A* + RPP 导航", "ros2 launch icar_nav navigation_rpp_launch.py", "导航")
     )
 
     @JvmStatic

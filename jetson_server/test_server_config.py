@@ -1,6 +1,7 @@
 import argparse
 import errno
 import http.client
+import io
 import json
 import queue
 import socket
@@ -14,13 +15,37 @@ import server
 
 class ServerConfigTest(unittest.TestCase):
     def test_slam_and_navigation_tasks_match_training_manual(self):
-        self.assertIn("ros2 launch yahboomcar_nav map_gmapping_launch.py", server.TASK_COMMANDS["map_gmapping"])
-        self.assertIn("ros2 launch yahboomcar_nav display_map_launch.py", server.TASK_COMMANDS["map_display"])
-        self.assertIn("ros2 launch yahboomcar_nav save_map_launch.py", server.TASK_COMMANDS["map_save"])
-        self.assertIn("ros2 launch yahboomcar_nav laser_bringup_launch.py", server.TASK_COMMANDS["nav_laser"])
-        self.assertIn("ros2 launch yahboomcar_nav display_nav_launch.py", server.TASK_COMMANDS["nav_display"])
-        self.assertIn("ros2 launch yahboomcar_nav navigation_dwa_launch.py", server.TASK_COMMANDS["nav_dwa"])
-        self.assertIn("ros2 launch yahboomcar_nav navigation_teb_launch.py", server.TASK_COMMANDS["nav_teb"])
+        self.assertIn("ros2 launch icar_nav map_gmapping_launch.py", server.TASK_COMMANDS["map_gmapping"])
+        self.assertIn("ros2 launch icar_nav display_map_launch.py", server.TASK_COMMANDS["map_display"])
+        self.assertIn("ros2 launch icar_nav save_map_launch.py", server.TASK_COMMANDS["map_save"])
+        self.assertIn("ros2 launch icar_nav laser_bringup_launch.py", server.TASK_COMMANDS["nav_laser"])
+        self.assertIn("ros2 launch icar_nav display_nav_launch.py", server.TASK_COMMANDS["nav_display"])
+        self.assertIn("ros2 launch icar_nav navigation_dwa_launch.py", server.TASK_COMMANDS["nav_dwa"])
+        self.assertIn("ros2 launch icar_nav navigation_teb_launch.py", server.TASK_COMMANDS["nav_teb"])
+        self.assertIn(
+            "ros2 launch icar_nav navigation_rpp_launch.py",
+            server.TASK_COMMANDS["nav_astar_rpp"],
+        )
+        for task in ("nav_dwa", "nav_teb", "nav_astar_rpp"):
+            self.assertIn(f"map:={server.ICAR_MAP_PATH}", server.TASK_COMMANDS[task])
+
+    def test_default_container_is_8b98(self):
+        self.assertEqual("8b98", server.DEFAULT_CONTAINER)
+
+    def test_systemd_unit_uses_8b98_and_single_server_path(self):
+        unit = Path(__file__).with_name("icar-control.service").read_text()
+
+        self.assertIn("After=network-online.target docker.service", unit)
+        self.assertIn("WorkingDirectory=/home/jetson/icar_app_server", unit)
+        self.assertIn("server.py --container 8b98", unit)
+
+    def test_automatic_workflow_steps_match_manual_shortcuts(self):
+        self.assertEqual(("map_gmapping", "map_display"), server.MAPPING_TASKS)
+        self.assertEqual(("nav_laser", "nav_display"), server.NAVIGATION_SHARED_TASKS)
+        self.assertEqual(
+            {"dwa": "nav_dwa", "teb": "nav_teb", "astar_rpp": "nav_astar_rpp"},
+            server.NAVIGATION_ALGORITHMS,
+        )
 
     def test_pose_publish_commands_target_nav2_topics(self):
         initial = server.build_initial_pose_command(1.2, -0.5, 1.57)
@@ -32,6 +57,34 @@ class ServerConfigTest(unittest.TestCase):
         self.assertIn("geometry_msgs/msg/PoseStamped", goal)
         self.assertIn("0.706", initial)
         self.assertIn("w: 1", goal)
+
+    def test_waypoint_payload_preserves_order_and_validates_numbers(self):
+        points = server.validated_waypoints({
+            "points": [
+                {"x": 1, "y": 2, "yaw": 0.5},
+                {"x": 3.25, "y": -1},
+            ]
+        })
+
+        self.assertEqual(
+            [
+                {"x": 1.0, "y": 2.0, "yaw": 0.5},
+                {"x": 3.25, "y": -1.0, "yaw": 0.0},
+            ],
+            points,
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            server.validated_waypoints({"points": []})
+
+        self.assertEqual(
+            {"x": 0.5, "y": -1.25, "yaw": 1.57},
+            server.validated_navigation_pose(
+                {"x": 0.5, "y": -1.25, "yaw": 1.57}, "start"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "start must be an object"):
+            server.validated_navigation_pose(None, "start")
 
     def test_lidar_avoidance_tasks_match_training_manual(self):
         self.assertEqual(
@@ -67,6 +120,13 @@ class ServerConfigTest(unittest.TestCase):
 
         self.assertEqual("8b98", bridge.container)
         self.assertEqual("motion_bridge.py", bridge.script_path.name)
+        self.assertTrue(bridge.script_path.is_file())
+
+    def test_navigation_bridge_factory_uses_repo_navigation_script(self):
+        bridge = server.create_navigation_bridge("ed97")
+
+        self.assertEqual("ed97", bridge.container)
+        self.assertEqual("navigation_bridge.py", bridge.script_path.name)
         self.assertTrue(bridge.script_path.is_file())
 
     def test_motion_limits_preserve_safe_remote_control_ranges(self):
@@ -122,6 +182,273 @@ class ServerConfigTest(unittest.TestCase):
                 server.port_number(value)
 
 
+class NavigationProfileTest(unittest.TestCase):
+    def setUp(self):
+        self.original_config = dict(server.SERVER_CONFIG)
+        self.original_commands = dict(server.TASK_COMMANDS)
+
+    def tearDown(self):
+        server.SERVER_CONFIG.clear()
+        server.SERVER_CONFIG.update(self.original_config)
+        server.TASK_COMMANDS.clear()
+        server.TASK_COMMANDS.update(self.original_commands)
+
+    def test_prefers_complete_icar_nav_profile(self):
+        with patch.object(server, "inspect_navigation_package", return_value=[]) as inspect:
+            profile = server.detect_navigation_profile("8b98")
+
+        self.assertTrue(profile["ready"])
+        self.assertEqual("icar_nav", profile["package"])
+        inspect.assert_called_once_with("8b98", "icar_nav")
+
+    def test_falls_back_to_complete_yahboom_profile(self):
+        required = list(server.NAVIGATION_LAUNCH_FILES.values())
+        with patch.object(
+            server,
+            "inspect_navigation_package",
+            side_effect=[required, []],
+        ):
+            profile = server.detect_navigation_profile("ed97")
+
+        self.assertTrue(profile["ready"])
+        self.assertEqual("yahboomcar_nav", profile["package"])
+
+    def test_reports_both_incomplete_profiles(self):
+        required = list(server.NAVIGATION_LAUNCH_FILES.values())
+        with patch.object(server, "inspect_navigation_package", return_value=required):
+            profile = server.detect_navigation_profile("empty")
+
+        self.assertFalse(profile["ready"])
+        self.assertIsNone(profile["package"])
+        self.assertEqual(
+            {"icar_nav": required, "yahboomcar_nav": required},
+            profile["missing_navigation_launches"],
+        )
+
+    def test_incomplete_profile_disables_navigation_but_keeps_base(self):
+        profile = {
+            "package": None,
+            "ready": False,
+            "missing_navigation_launches": {"icar_nav": ["navigation_rpp_launch.py"]},
+        }
+        server.SERVER_CONFIG["dry_run"] = True
+        server.apply_navigation_profile(profile)
+
+        base_status, _ = server.start_task("base")
+        navigation_status, body = server.start_task("map_gmapping")
+
+        self.assertEqual(200, base_status)
+        self.assertEqual(503, navigation_status)
+        self.assertFalse(body["navigation_tasks_ready"])
+        self.assertEqual("map_gmapping", body["task"])
+
+        with patch.object(server, "start_task") as start:
+            workflow_status, workflow_body = server.start_automatic_mapping()
+        self.assertEqual(503, workflow_status)
+        self.assertFalse(workflow_body["navigation_tasks_ready"])
+        start.assert_not_called()
+
+    def test_apply_profile_updates_all_navigation_commands_and_n5_override(self):
+        profile = {
+            "package": "yahboomcar_nav",
+            "ready": True,
+            "missing_navigation_launches": {},
+        }
+        override = "ros2 launch custom_pkg custom_rpp_launch.py"
+
+        server.apply_navigation_profile(profile, override)
+
+        self.assertEqual(
+            "ros2 launch yahboomcar_nav map_gmapping_launch.py",
+            server.TASK_COMMANDS["map_gmapping"],
+        )
+        self.assertEqual(override, server.TASK_COMMANDS["nav_astar_rpp"])
+
+    def test_container_switch_applies_detected_navigation_profile(self):
+        class Bridge:
+            def shutdown(self, *args, **kwargs):
+                pass
+
+        original_motion = getattr(server, "MOTION_BRIDGE", None)
+        original_navigation = getattr(server, "NAVIGATION_BRIDGE", None)
+        self.addCleanup(setattr, server, "MOTION_BRIDGE", original_motion)
+        self.addCleanup(setattr, server, "NAVIGATION_BRIDGE", original_navigation)
+        server.MOTION_BRIDGE = Bridge()
+        server.NAVIGATION_BRIDGE = Bridge()
+        server.SERVER_CONFIG["container"] = "8b98"
+        server.SERVER_CONFIG["dry_run"] = True
+        profile = {
+            "package": "yahboomcar_nav",
+            "ready": True,
+            "missing_navigation_launches": {},
+        }
+
+        with patch.object(server, "configured_container_is_running", return_value=True), patch.object(
+            server, "detect_navigation_profile", return_value=profile
+        ), patch.object(server, "create_motion_bridge", return_value=Bridge()), patch.object(
+            server, "create_navigation_bridge", return_value=Bridge()
+        ):
+            status, body = server.select_container("ed97")
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["changed"])
+        self.assertEqual("yahboomcar_nav", body["navigation_package"])
+        self.assertEqual(
+            "ros2 launch yahboomcar_nav navigation_dwa_launch.py",
+            server.TASK_COMMANDS["nav_dwa"],
+        )
+
+    def test_main_rejects_stopped_container_before_creating_bridges(self):
+        with patch("sys.argv", ["server.py", "--container", "8b98"]), patch(
+            "sys.stderr", new=io.StringIO()
+        ), patch.object(
+            server, "configured_container_is_running", return_value=False
+        ), patch.object(server, "create_motion_bridge") as create_motion, self.assertRaises(
+            SystemExit
+        ):
+            server.main()
+
+        create_motion.assert_not_called()
+
+
+class AutomationWorkflowTest(unittest.TestCase):
+    def test_process_snapshot_keeps_complete_launch_process_list(self):
+        output = (
+            "100 ros2 launch icar_nav navigation_dwa_launch.py\n"
+            + "x" * 5000
+        )
+        with patch.object(
+            server,
+            "run_once",
+            return_value={"returncode": 0, "stdout": output, "stderr": ""},
+        ) as run_once:
+            snapshot = server.task_process_snapshot()
+
+        run_once.assert_called_once_with(
+            "ps -eo pid=,args=", timeout=3, output_limit=None
+        )
+        self.assertIn("navigation_dwa_launch.py", snapshot["nav_dwa"])
+
+    def test_container_id_validation_accepts_docker_names_and_rejects_shell_text(self):
+        self.assertTrue(server.valid_container_id("8b98"))
+        self.assertTrue(server.valid_container_id("icar-foxy_1.0"))
+        self.assertFalse(server.valid_container_id(""))
+        self.assertFalse(server.valid_container_id("8b98; rm -rf /"))
+
+    def test_container_selection_rejects_a_container_that_is_not_running(self):
+        with patch.object(server, "configured_container_is_running", return_value=False):
+            status, body = server.select_container("missing-container")
+
+        self.assertEqual(404, status)
+        self.assertEqual("container is not running", body["error"])
+
+    def test_mapping_stops_navigation_then_starts_m1_and_m2(self):
+        calls = []
+
+        def fake_stop_task(task):
+            calls.append(("stop", task))
+            return 200, {"task": task, "status": "stopped"}
+
+        def fake_stop_tasks(tasks):
+            results = []
+            for task in reversed(tuple(tasks)):
+                calls.append(("stop", task))
+                results.append({"task": task, "status": "stopped"})
+            return results
+
+        def fake_start(task):
+            calls.append(("start", task))
+            return 200, {"task": task, "status": "started"}
+
+        with patch.object(server, "stop_task", side_effect=fake_stop_task), patch.object(
+            server, "stop_tasks", side_effect=fake_stop_tasks
+        ), patch.object(
+            server, "start_task", side_effect=fake_start
+        ):
+            status, body = server.start_automatic_mapping()
+
+        self.assertEqual(200, status)
+        self.assertEqual("running", body["status"])
+        self.assertEqual(
+            [("start", "map_gmapping"), ("start", "map_display")],
+            [call for call in calls if call[0] == "start"],
+        )
+        self.assertEqual(["m1", "m2"], body["steps"])
+        self.assertIn(("stop", "base"), calls)
+        self.assertLess(calls.index(("stop", "base")), calls.index(("start", "map_gmapping")))
+        self.assertLess(calls.index(("stop", "nav_dwa")), calls.index(("start", "map_gmapping")))
+        self.assertIn(("stop", "map_gmapping"), calls)
+        self.assertLess(calls.index(("stop", "map_gmapping")), calls.index(("start", "map_gmapping")))
+
+    def test_navigation_starts_n1_n2_then_selected_algorithm(self):
+        started = []
+
+        def fake_start(task):
+            started.append(task)
+            return 200, {"task": task, "status": "started"}
+
+        with patch.object(server, "stop_task", return_value=(200, {"status": "stopped"})), patch.object(
+            server, "stop_tasks", return_value=[]
+        ), patch.object(
+            server, "start_task", side_effect=fake_start
+        ):
+            status, body = server.start_automatic_navigation("teb")
+
+        self.assertEqual(200, status)
+        self.assertEqual(["nav_laser", "nav_display", "nav_teb"], started)
+        self.assertEqual(["n1", "n2", "n4"], body["steps"])
+        self.assertEqual("teb", body["algorithm"])
+        self.assertEqual("stopped", body["stopped_base"]["status"])
+
+    def test_navigation_rejects_unknown_algorithm(self):
+        status, body = server.start_automatic_navigation("astar")
+
+        self.assertEqual(400, status)
+        self.assertEqual("algorithm must be dwa, teb or astar_rpp", body["error"])
+
+    def test_n5_starts_astar_and_rpp_profile(self):
+        started = []
+
+        def fake_start(task):
+            started.append(task)
+            return 200, {"task": task, "status": "started"}
+
+        with patch.object(server, "stop_task", return_value=(200, {"status": "stopped"})), patch.object(
+            server, "stop_tasks", return_value=[]
+        ), patch.object(
+            server, "start_task", side_effect=fake_start
+        ):
+            status, body = server.start_automatic_navigation("astar_rpp")
+
+        self.assertEqual(200, status)
+        self.assertEqual(["nav_laser", "nav_display", "nav_astar_rpp"], started)
+        self.assertEqual(["n1", "n2", "n5"], body["steps"])
+
+    def test_save_map_runs_m4_before_stopping_mapping_nodes(self):
+        calls = []
+
+        def fake_start(task):
+            calls.append(("start", task))
+            return 200, {"task": task, "status": "finished", "result": {"returncode": 0}}
+
+        def fake_stop_tasks(tasks):
+            results = []
+            for task in reversed(tuple(tasks)):
+                calls.append(("stop", task))
+                results.append({"task": task, "status": "stopped"})
+            return results
+
+        with patch.object(server, "start_task", side_effect=fake_start), patch.object(
+            server, "stop_tasks", side_effect=fake_stop_tasks
+        ):
+            status, body = server.save_automatic_mapping()
+
+        self.assertEqual(200, status)
+        self.assertEqual("saved", body["status"])
+        self.assertEqual(("start", "map_save"), calls[0])
+        self.assertEqual([("stop", "map_display"), ("stop", "map_gmapping")], calls[1:])
+
+
 class FakeMotionBridge:
     def __init__(self, ready=True):
         self.ready = ready
@@ -144,6 +471,38 @@ class FailingMotionBridge(FakeMotionBridge):
     def send(self, direction, speed, turn):
         self.calls.append((direction, speed, turn))
         raise RuntimeError("bridge offline")
+
+
+class FakeNavigationBridge:
+    def __init__(self, ready=True):
+        self.ready = ready
+        self.calls = []
+
+    def is_running(self):
+        return self.ready
+
+    def snapshot(self, map_generation=-1):
+        self.calls.append(map_generation)
+        return {
+            "map_generation": 4,
+            "map": None,
+            "pose": {"x": 1.0, "y": 2.0, "yaw": 0.5},
+            "goal": None,
+            "path": [],
+            "updated_at": 10.0,
+        }
+
+    def follow_waypoints(self, points, start=None):
+        self.calls.append(("follow", points, start))
+        return {"state": "submitting", "total": len(points), "current_index": 0}
+
+    def cancel_waypoints(self):
+        self.calls.append(("cancel",))
+        return {"state": "canceling"}
+
+    def reset_map(self):
+        self.calls.append(("reset_map",))
+        return {"ok": True, "map_generation": 5}
 
 
 class FakeCameraService:
@@ -178,8 +537,11 @@ class ServerMainLifecycleTest(unittest.TestCase):
                 events.append("camera.shutdown")
 
         class LifecycleBridge:
+            def __init__(self, name):
+                self.name = name
+
             def shutdown(self):
-                events.append("motion.shutdown")
+                events.append(f"{self.name}.shutdown")
 
         class LifecycleServer:
             def __init__(self, address, handler):
@@ -203,20 +565,25 @@ class ServerMainLifecycleTest(unittest.TestCase):
         bridge_existed = hasattr(server, "MOTION_BRIDGE")
         original_camera = getattr(server, "CAMERA_STREAM", None)
         original_bridge = getattr(server, "MOTION_BRIDGE", None)
+        navigation_existed = hasattr(server, "NAVIGATION_BRIDGE")
+        original_navigation = getattr(server, "NAVIGATION_BRIDGE", None)
         self.addCleanup(restore_global, "CAMERA_STREAM", camera_existed, original_camera)
         self.addCleanup(restore_global, "MOTION_BRIDGE", bridge_existed, original_bridge)
+        self.addCleanup(restore_global, "NAVIGATION_BRIDGE", navigation_existed, original_navigation)
 
         with patch("sys.argv", ["server.py", "--dry-run"]), patch.object(
             server, "create_camera_stream", return_value=LifecycleCamera()
         ), patch.object(
-            server, "create_motion_bridge", return_value=LifecycleBridge()
+            server, "create_motion_bridge", return_value=LifecycleBridge("motion")
+        ), patch.object(
+            server, "create_navigation_bridge", return_value=LifecycleBridge("navigation")
         ), patch.object(
             server, "ThreadingHTTPServer", LifecycleServer
         ), self.assertRaises(KeyboardInterrupt):
             server.main()
 
         self.assertEqual(
-            ["serve_forever", "camera.shutdown", "server.close", "motion.shutdown"],
+            ["serve_forever", "camera.shutdown", "server.close", "motion.shutdown", "navigation.shutdown"],
             events,
         )
 
@@ -228,8 +595,11 @@ class ServerMainLifecycleTest(unittest.TestCase):
                 events.append("camera.shutdown")
 
         class LifecycleBridge:
+            def __init__(self, name):
+                self.name = name
+
             def shutdown(self):
-                events.append("motion.shutdown")
+                events.append(f"{self.name}.shutdown")
 
         def failing_server_factory(address, handler):
             events.append("server.bind")
@@ -239,6 +609,8 @@ class ServerMainLifecycleTest(unittest.TestCase):
         bridge_existed = hasattr(server, "MOTION_BRIDGE")
         original_camera = getattr(server, "CAMERA_STREAM", None)
         original_bridge = getattr(server, "MOTION_BRIDGE", None)
+        navigation_existed = hasattr(server, "NAVIGATION_BRIDGE")
+        original_navigation = getattr(server, "NAVIGATION_BRIDGE", None)
 
         def restore_global(name, existed, value):
             if existed:
@@ -248,18 +620,21 @@ class ServerMainLifecycleTest(unittest.TestCase):
 
         self.addCleanup(restore_global, "CAMERA_STREAM", camera_existed, original_camera)
         self.addCleanup(restore_global, "MOTION_BRIDGE", bridge_existed, original_bridge)
+        self.addCleanup(restore_global, "NAVIGATION_BRIDGE", navigation_existed, original_navigation)
 
         with patch("sys.argv", ["server.py", "--dry-run"]), patch.object(
             server, "create_camera_stream", return_value=LifecycleCamera()
         ), patch.object(
-            server, "create_motion_bridge", return_value=LifecycleBridge()
+            server, "create_motion_bridge", return_value=LifecycleBridge("motion")
+        ), patch.object(
+            server, "create_navigation_bridge", return_value=LifecycleBridge("navigation")
         ), patch.object(
             server, "ThreadingHTTPServer", side_effect=failing_server_factory
         ), self.assertRaisesRegex(OSError, "address already in use"):
             server.main()
 
         self.assertEqual(
-            ["server.bind", "camera.shutdown", "motion.shutdown"],
+            ["server.bind", "camera.shutdown", "motion.shutdown", "navigation.shutdown"],
             events,
         )
 
@@ -268,11 +643,13 @@ class MotionRouteTest(unittest.TestCase):
     def setUp(self):
         self.original_bridge = getattr(server, "MOTION_BRIDGE", None)
         self.original_camera = getattr(server, "CAMERA_STREAM", None)
+        self.original_navigation_bridge = getattr(server, "NAVIGATION_BRIDGE", None)
         self.original_dry_run = server.SERVER_CONFIG["dry_run"]
         self.original_container_running = getattr(server, "container_is_running", None)
         self.original_task_processes = getattr(server, "task_processes", None)
         server.SERVER_CONFIG["dry_run"] = True
         server.RUNNING.clear()
+        server.NAVIGATION_BRIDGE = FakeNavigationBridge()
         self.handler = object.__new__(server.Handler)
 
     def tearDown(self):
@@ -287,6 +664,7 @@ class MotionRouteTest(unittest.TestCase):
                 delattr(server, "CAMERA_STREAM")
         else:
             server.CAMERA_STREAM = self.original_camera
+        server.NAVIGATION_BRIDGE = self.original_navigation_bridge
         if self.original_container_running is not None:
             server.container_is_running = self.original_container_running
         if self.original_task_processes is not None:
@@ -305,6 +683,18 @@ class MotionRouteTest(unittest.TestCase):
         self.assertEqual([("front", 0.12, 0.7)], bridge.calls)
         self.assertTrue(body["ok"])
         self.assertEqual(2.5, body["bridge_latency_ms"])
+        self.assertEqual("dry_run", body["base"])
+
+    def test_stop_route_does_not_start_base(self):
+        bridge = FakeMotionBridge()
+        server.MOTION_BRIDGE = bridge
+
+        with patch.object(server, "ensure_base_for_manual_motion") as ensure_base:
+            status, body = self.handler.route("move/stop", {})
+
+        self.assertEqual(200, status)
+        ensure_base.assert_not_called()
+        self.assertEqual([("stop", 0.18, 0.8)], bridge.calls)
 
     def test_move_route_clamps_speed_and_turn_to_safe_ranges(self):
         bridge = FakeMotionBridge()
@@ -328,13 +718,32 @@ class MotionRouteTest(unittest.TestCase):
         self.assertIn("motion_bridge_ready", body)
         self.assertTrue(body["motion_bridge_ready"])
         self.assertTrue(body["container_running"])
+        self.assertTrue(body["navigation_bridge_ready"])
+        self.assertIn("navigation_package", body)
+        self.assertIn("navigation_tasks_ready", body)
+        self.assertIn("missing_navigation_launches", body)
+
+    def test_navigation_state_returns_live_bridge_snapshot(self):
+        bridge = FakeNavigationBridge()
+        server.NAVIGATION_BRIDGE = bridge
+
+        status, body = self.handler.route("navigation/state", {"map_generation": ["3"]})
+
+        self.assertEqual(200, status)
+        self.assertEqual([3], bridge.calls)
+        self.assertEqual(4, body["map_generation"])
+        self.assertEqual(1.0, body["pose"]["x"])
 
     def test_status_uses_actual_container_process_discovery(self):
-        self.assertTrue(hasattr(server, "task_processes"), "server is missing task_processes")
+        self.assertTrue(hasattr(server, "task_process_snapshot"), "server is missing task_process_snapshot")
         server.MOTION_BRIDGE = FakeMotionBridge(ready=True)
-        server.task_processes = lambda task: "42 process" if task == "base" else ""
+        snapshot = {
+            task: "42 process" if task == "base" else ""
+            for task in server.TASK_COMMANDS
+        }
 
-        status, body = self.handler.route("status", {})
+        with patch.object(server, "task_process_snapshot", return_value=snapshot):
+            status, body = self.handler.route("status", {})
 
         self.assertEqual(200, status)
         self.assertTrue(body["base"]["running"])
@@ -636,6 +1045,8 @@ class MotionBridgeClientTest(unittest.TestCase):
 
         shell_command = process_factory.commands[0][-1]
         self.assertIn("export ROS_DOMAIN_ID=32", shell_command)
+        self.assertIn("export ROBOT_TYPE=x3", shell_command)
+        self.assertIn("export RPLIDAR_TYPE=a1", shell_command)
         client.shutdown(send_stop=False)
 
     def test_multiple_commands_reuse_one_persistent_process(self):
@@ -654,7 +1065,11 @@ class MotionBridgeClientTest(unittest.TestCase):
         second = client.send("stop", 0.0, 0.0)
 
         self.assertEqual(1, len(process_factory.processes))
-        self.assertEqual(1, len(copy_runner.commands))
+        self.assertEqual(2, len(copy_runner.commands))
+        self.assertEqual(
+            "pkill -f '[i]car_motion_bridge.py' || true",
+            copy_runner.commands[1][-1],
+        )
         self.assertEqual(1, first["sequence"])
         self.assertEqual(2, second["sequence"])
         client.shutdown(send_stop=False)

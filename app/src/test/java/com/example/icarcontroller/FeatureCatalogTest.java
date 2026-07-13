@@ -57,5 +57,6 @@ public class FeatureCatalogTest {
         assertTrue(FeatureCatalog.navigationTasks().stream().anyMatch(task -> task.getKey().equals("nav_display")));
         assertTrue(FeatureCatalog.navigationTasks().stream().anyMatch(task -> task.getKey().equals("nav_dwa")));
         assertTrue(FeatureCatalog.navigationTasks().stream().anyMatch(task -> task.getKey().equals("nav_teb")));
+        assertTrue(FeatureCatalog.navigationTasks().stream().anyMatch(task -> task.getKey().equals("nav_astar_rpp")));
     }
 }

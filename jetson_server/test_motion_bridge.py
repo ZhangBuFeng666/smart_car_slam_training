@@ -68,6 +68,14 @@ class MotionWatchdogTest(unittest.TestCase):
 
         self.assertFalse(watchdog.consume_expiry(now=11.0))
 
+    def test_disabled_watchdog_keeps_motion_until_explicit_stop(self):
+        watchdog_type = self.required("MotionWatchdog")
+        watchdog = watchdog_type(timeout_seconds=0.0)
+
+        watchdog.update(direction="front", now=10.0)
+
+        self.assertFalse(watchdog.consume_expiry(now=100.0))
+
     def required(self, name):
         self.assertTrue(hasattr(motion_bridge, name), f"motion_bridge is missing {name}")
         return getattr(motion_bridge, name)
@@ -107,6 +115,17 @@ class MotionBridgeRuntimeTest(unittest.TestCase):
 
         self.assertTrue(expired)
         self.assertEqual((0.0, 0.0, 0.0), published[-1])
+
+    def test_disabled_watchdog_does_not_interrupt_continuous_motion(self):
+        runtime_type = self.required("MotionBridgeRuntime")
+        published = []
+        runtime = runtime_type(published.append, watchdog_seconds=0.0, clock=lambda: 30.0)
+        runtime.handle_line(json.dumps({"sequence": 1, "direction": "front", "speed": 0.1, "turn": 0.6}))
+
+        expired = runtime.poll_watchdog(now=300.0)
+
+        self.assertFalse(expired)
+        self.assertEqual([(0.1, 0.0, 0.0)], published)
 
     def test_shutdown_always_publishes_zero_velocity(self):
         runtime_type = self.required("MotionBridgeRuntime")

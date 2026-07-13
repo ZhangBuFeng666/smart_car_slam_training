@@ -32,11 +32,34 @@ class CarApi(host: String, private val port: Int) {
 
     fun emergencyStopUrl(): String = "$baseUrl/emergency_stop"
 
+    fun containerStatusUrl(): String = "$baseUrl/container/status"
+
+    fun selectContainerUrl(container: String): String =
+        "$baseUrl/container/select?id=${encode(container.trim())}"
+
+    fun automationStatusUrl(): String = "$baseUrl/automation/status"
+
+    fun automaticMappingStartUrl(): String = "$baseUrl/automation/mapping/start"
+
+    fun automaticMappingSaveUrl(): String = "$baseUrl/automation/mapping/save"
+
+    fun automaticNavigationStartUrl(algorithm: String): String =
+        "$baseUrl/automation/navigation/start?algorithm=${encode(algorithm)}"
+
+    fun automaticNavigationStopUrl(): String = "$baseUrl/automation/navigation/stop"
+
     fun navigationInitialPoseUrl(x: Double, y: Double, yaw: Double): String =
         navigationPoseUrl("initial_pose", x, y, yaw)
 
     fun navigationGoalUrl(x: Double, y: Double, yaw: Double): String =
         navigationPoseUrl("goal", x, y, yaw)
+
+    fun navigationStateUrl(mapGeneration: Long): String =
+        "$baseUrl/navigation/state?map_generation=$mapGeneration"
+
+    fun navigationWaypointsUrl(): String = "$baseUrl/navigation/waypoints"
+
+    fun navigationWaypointsCancelUrl(): String = "$baseUrl/navigation/waypoints/cancel"
 
     fun moveUrl(direction: String, speed: Double, turn: Double? = null): String {
         val speedText = speed.toFixedText()

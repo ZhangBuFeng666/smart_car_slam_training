@@ -1,0 +1,18 @@
+[Unit]
+Description=iCar Android HTTP control service
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/icar_app_server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/jetson/icar_app_server/server.py --container 8b98 --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=8
+
+[Install]
+WantedBy=multi-user.target

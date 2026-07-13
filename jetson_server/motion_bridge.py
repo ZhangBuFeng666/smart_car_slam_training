@@ -72,7 +72,7 @@ class MotionWatchdog:
         self.deadline: Optional[float] = None
 
     def update(self, direction: str, now: float) -> None:
-        if direction == "stop":
+        if direction == "stop" or self.timeout_seconds <= 0:
             self.deadline = None
         else:
             self.deadline = float(now) + self.timeout_seconds
@@ -163,7 +163,7 @@ class MotionBridgeRuntime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Persistent ROS 2 /cmd_vel publisher")
-    parser.add_argument("--watchdog-ms", type=int, default=350)
+    parser.add_argument("--watchdog-ms", type=int, default=0)
     args = parser.parse_args()
 
     import rclpy
@@ -184,7 +184,7 @@ def main() -> None:
 
     runtime = MotionBridgeRuntime(
         publish_twist=publish,
-        watchdog_seconds=max(args.watchdog_ms, 100) / 1000.0,
+        watchdog_seconds=max(args.watchdog_ms, 0) / 1000.0,
     )
 
     def measured_velocity(message: Twist) -> None:

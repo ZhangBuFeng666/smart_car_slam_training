@@ -42,6 +42,50 @@ public class CarApiTest {
                 "http://10.161.57.230:8000/navigation/goal?x=2&y=3.45&yaw=0",
                 api.navigationGoalUrl(2.0, 3.45, 0.0)
         );
+        assertEquals(
+                "http://10.161.57.230:8000/navigation/state?map_generation=7",
+                api.navigationStateUrl(7)
+        );
+        assertEquals(
+                "http://10.161.57.230:8000/navigation/waypoints",
+                api.navigationWaypointsUrl()
+        );
+        assertEquals(
+                "http://10.161.57.230:8000/navigation/waypoints/cancel",
+                api.navigationWaypointsCancelUrl()
+        );
+    }
+
+    @Test
+    public void buildsAutomaticMappingAndNavigationUrls() {
+        CarApi api = new CarApi("10.161.57.230", 8000);
+
+        assertEquals("http://10.161.57.230:8000/automation/status", api.automationStatusUrl());
+        assertEquals("http://10.161.57.230:8000/automation/mapping/start", api.automaticMappingStartUrl());
+        assertEquals("http://10.161.57.230:8000/automation/mapping/save", api.automaticMappingSaveUrl());
+        assertEquals(
+                "http://10.161.57.230:8000/automation/navigation/start?algorithm=dwa",
+                api.automaticNavigationStartUrl("dwa")
+        );
+        assertEquals(
+                "http://10.161.57.230:8000/automation/navigation/stop",
+                api.automaticNavigationStopUrl()
+        );
+        assertEquals(
+                "http://10.161.57.230:8000/automation/navigation/start?algorithm=astar_rpp",
+                api.automaticNavigationStartUrl("astar_rpp")
+        );
+    }
+
+    @Test
+    public void buildsContainerSelectionUrls() {
+        CarApi api = new CarApi("10.161.57.230", 8000);
+
+        assertEquals("http://10.161.57.230:8000/container/status", api.containerStatusUrl());
+        assertEquals(
+                "http://10.161.57.230:8000/container/select?id=icar-foxy",
+                api.selectContainerUrl(" icar-foxy ")
+        );
     }
 
     @Test

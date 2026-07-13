@@ -43,6 +43,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Space
 import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -83,6 +85,9 @@ class MainActivity : Activity() {
     private var txtLog: TextView? = null
     private var vehicleStage: Vehicle3DStageView? = null
     private var parkingVisionView: ParkingVisionView? = null
+    private var parkingMapView: ParkingMapView? = null
+    private var parkingMapCaption: TextView? = null
+    private var parkingWaypointStatusText: TextView? = null
     private var driveCameraPanel: DriveCameraPanel? = null
     private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
     private var fullscreenDrivePending = false
@@ -97,12 +102,14 @@ class MainActivity : Activity() {
     private val moveExecutor = Executors.newSingleThreadExecutor()
     private val stopExecutor = Executors.newSingleThreadExecutor()
     private val voiceExecutor = Executors.newSingleThreadExecutor()
+    private val navigationExecutor = Executors.newSingleThreadExecutor()
     private val moveGate = RequestGate()
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
 
     private var selectedPage = "home"
     private var currentHost = "10.161.57.230"
     private var currentPort = 8000
+    private var currentRosContainer = "8b98"
     private var jarvisCurrentPlan: JarvisMissionPlan? = null
     private var jarvisMissionId: String? = null
     private var jarvisToken = ""
@@ -112,6 +119,9 @@ class MainActivity : Activity() {
     private var logText = "最近操作会显示在这里"
     private var isVehicleConnected = false
     private var parkingThemeMode = ParkingThemeMode.LIGHT
+    private var navigationMapGeneration = -1L
+    @Volatile private var navigationPollInFlight = false
+    private val navigationPollRunnable = Runnable { pollNavigationState() }
 
     private val repeatMoveRunnable = object : Runnable {
         override fun run() {
@@ -184,10 +194,12 @@ class MainActivity : Activity() {
         vehicleStage?.destroy()
         vehicleStage = null
         stopMove()
+        stopNavigationPolling()
         commandExecutor.shutdownNow()
         moveExecutor.shutdown()
         stopExecutor.shutdown()
-        voiceExecutor.shutdown()
+    voiceExecutor.shutdown()
+    navigationExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -198,6 +210,7 @@ class MainActivity : Activity() {
         if (selectedPage == "drive") {
             driveCameraPanel?.start(api().cameraStreamUrl())
         }
+        if (selectedPage == "nav") startNavigationPolling()
     }
 
     override fun onPause() {
@@ -206,6 +219,7 @@ class MainActivity : Activity() {
         driveCameraPanel?.stop()
         vehicleStage?.onHostPause()
         parkingVisionView?.setActive(false)
+        stopNavigationPolling()
         super.onPause()
     }
 
@@ -213,6 +227,7 @@ class MainActivity : Activity() {
         exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
         releaseDriveCameraPanel()
+        stopNavigationPolling()
         saveConnectionInputs()
         selectedPage = key
         currentDirection = null
@@ -224,6 +239,8 @@ class MainActivity : Activity() {
         vehicleStage?.destroy()
         vehicleStage = null
         parkingVisionView = null
+        parkingMapView = null
+        parkingMapCaption = null
         homeConnectionText = null
         pageStatusText = null
         hostInput = null
@@ -252,6 +269,11 @@ class MainActivity : Activity() {
             "ai" -> renderAiPage()
             "vision" -> renderVision()
             "nav" -> renderNavigation()
+        }
+
+        if (key == "nav") {
+            navigationMapGeneration = -1L
+            startNavigationPolling()
         }
 
         animatePageIn()
@@ -488,6 +510,7 @@ class MainActivity : Activity() {
         ))
         pageContent.addView(parkingMapSurface())
         pageContent.addView(parkingRouteStatus())
+        pageContent.addView(parkingContainerSelector())
         pageContent.addView(parkingNavigationDeck())
         pageContent.addView(parkingSafetyStrip())
     }
@@ -1715,6 +1738,8 @@ class MainActivity : Activity() {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
         layoutParams = matchWrapParams(bottom = 12)
+        lateinit var startButton: Button
+        lateinit var waypointButton: Button
         val map = ParkingMapView(this@MainActivity).apply {
             setPalette(palette)
             elevation = dp(3).toFloat()
@@ -1722,7 +1747,27 @@ class MainActivity : Activity() {
                 setStatus("已选择检查点 $checkpoint")
                 appendLog("路线图选择检查点 $checkpoint")
             }
+            setOnWaypointSelectedListener { point, error ->
+                if (error != null) {
+                    setStatus(error)
+                } else if (point != null) {
+                    val count = routeWaypoints().size
+                    setStatus("已添加巡逻点 $count：${"%.2f".format(Locale.US, point.x)}, ${"%.2f".format(Locale.US, point.y)}")
+                    parkingWaypointStatusText?.text = "已选择 $count 个点 · 按编号顺序执行"
+                }
+            }
+            setOnRouteStartSelectedListener { start, error ->
+                if (error != null) {
+                    setStatus(error)
+                } else if (start != null) {
+                    setStatus("已设置路线起点：${"%.2f".format(Locale.US, start.x)}, ${"%.2f".format(Locale.US, start.y)}")
+                    parkingWaypointStatusText?.text = "起点 S 已设置 · 请继续添加目标点"
+                    startButton.text = "设置起点"
+                    waypointButton.text = "添加目标点"
+                }
+            }
         }
+        parkingMapView = map
         addView(map, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(InteractionSpec.parkingMapStageHeightDp())
@@ -1731,7 +1776,196 @@ class MainActivity : Activity() {
             text = "本地路线草图 · 接入 ROS 地图后替换为实时位姿"
             setTextColor(color(palette.textSecondary))
             textSize = 10f
+            parkingMapCaption = this
         }, matchWrapParams(top = 7))
+
+        addView(TextView(this@MainActivity).apply {
+            text = "触屏路线未编辑"
+            setTextColor(color(palette.textSecondary))
+            textSize = 11f
+            parkingWaypointStatusText = this
+        }, matchWrapParams(top = 7))
+
+        startButton = parkingOutlineButton("设置起点") {
+            if (!map.hasLiveMap()) {
+                setStatus("请先启动导航并等待实时地图加载")
+            } else {
+                val enabled = !map.isStartSelectionMode()
+                map.setStartSelectionMode(enabled)
+                startButton.text = if (enabled) "取消设置" else "设置起点"
+                waypointButton.text = "添加目标点"
+                parkingWaypointStatusText?.text = if (enabled) "请在地图空闲区域点击路线起点 S"
+                else "起点设置已取消"
+            }
+        }
+        waypointButton = parkingOutlineButton("添加目标点") {
+            if (!map.hasLiveMap()) {
+                setStatus("请先启动导航并等待实时地图加载")
+            } else if (map.routeStartPose() == null) {
+                setStatus("请先点击“设置起点”，在地图上标记 S")
+            } else {
+                val enabled = !map.isWaypointEditMode()
+                map.setWaypointEditMode(enabled)
+                waypointButton.text = if (enabled) "完成选点" else "添加目标点"
+                startButton.text = "设置起点"
+                parkingWaypointStatusText?.text = if (enabled) {
+                    "目标点模式 · 依次点击地图空闲区域"
+                } else {
+                    "起点 S · ${map.routeWaypoints().size} 个目标点"
+                }
+            }
+        }
+        val modeRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(startButton, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(waypointButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+        }
+        addView(modeRow, matchWrapParams(top = 9))
+
+        val editRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("撤销") {
+                val count = map.undoWaypoint()
+                parkingWaypointStatusText?.text = "起点 S · 已选择 $count 个目标点"
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+            addView(parkingOutlineButton("清空") {
+                map.clearWaypoints()
+                startButton.text = "设置起点"
+                waypointButton.text = "添加目标点"
+                parkingWaypointStatusText?.text = "起点和目标点已清空"
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+        }
+        addView(editRow, matchWrapParams(top = 7))
+
+        val zoomRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("放大 +") { map.zoomIn() }, LinearLayout.LayoutParams(0, dp(42), 1f))
+            addView(parkingOutlineButton("缩小 −") { map.zoomOut() }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+            addView(parkingOutlineButton("视图复位") { map.resetMapViewport() }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+        }
+        addView(zoomRow, matchWrapParams(top = 7))
+
+        val routeRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("返回起点") {
+                if (!map.appendReturnToStart()) setStatus("尚未获得小车实时位姿")
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(parkingPrimaryButton("提交起点与目标点") {
+                submitTouchWaypoints(map.routeStartPose(), map.routeWaypoints())
+            }, LinearLayout.LayoutParams(0, dp(48), 1.6f).apply { setMargins(dp(8), 0, 0, 0) })
+        }
+        addView(routeRow, matchWrapParams(top = 8))
+    }
+
+    private fun startNavigationPolling() {
+        mainHandler.removeCallbacks(navigationPollRunnable)
+        if (selectedPage == "nav" && !isFinishing) {
+            mainHandler.post(navigationPollRunnable)
+        }
+    }
+
+    private fun stopNavigationPolling() {
+        mainHandler.removeCallbacks(navigationPollRunnable)
+    }
+
+    private fun pollNavigationState() {
+        if (selectedPage != "nav") return
+        if (navigationPollInFlight) {
+            mainHandler.postDelayed(navigationPollRunnable, 300L)
+            return
+        }
+        navigationPollInFlight = true
+        val generation = navigationMapGeneration
+        val url = CarApi(currentHost, currentPort).navigationStateUrl(generation)
+        navigationExecutor.execute {
+            val result = runCatching {
+                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 1800
+                    readTimeout = 2500
+                }
+                try {
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.use { input ->
+                        BufferedReader(InputStreamReader(input)).readText()
+                    }.orEmpty()
+                    check(code in 200..299) { "HTTP $code ${body.take(120)}" }
+                    NavigationSnapshotParser.parse(body)
+                } finally {
+                    connection.disconnect()
+                }
+            }
+            runOnUiThread {
+                result.onSuccess { snapshot ->
+                    navigationMapGeneration = snapshot.mapGeneration
+                    parkingMapView?.applyNavigationSnapshot(snapshot)
+                    if (parkingMapView?.hasLiveMap() == true) {
+                        parkingMapCaption?.text = "ROS 实时地图 · 小车位姿、目标点与规划路径"
+                    }
+                    val waypointStatus = snapshot.waypoints
+                    if (waypointStatus.state != "idle" || waypointStatus.total > 0) {
+                        val current = if (waypointStatus.currentIndex >= 0) waypointStatus.currentIndex + 1 else 0
+                        parkingWaypointStatusText?.text = when (waypointStatus.state) {
+                            "preparing", "active", "submitting" -> "多点导航 $current/${waypointStatus.total} · ${waypointStatus.message}"
+                            "completed" -> "多点导航完成 · ${waypointStatus.total}/${waypointStatus.total}"
+                            "failed", "rejected" -> "多点导航失败 · ${waypointStatus.message}"
+                            "canceling", "canceled" -> waypointStatus.message
+                            else -> waypointStatus.message.ifBlank { "多点导航 ${waypointStatus.state}" }
+                        }
+                    }
+                }
+                navigationPollInFlight = false
+                if (selectedPage == "nav" && !isFinishing) {
+                    mainHandler.postDelayed(navigationPollRunnable, 750L)
+                }
+            }
+        }
+    }
+
+    private fun submitTouchWaypoints(start: NavigationPose?, points: List<NavigationPoint>) {
+        if (start == null) {
+            setStatus("请先在地图上设置路线起点 S")
+            return
+        }
+        if (points.isEmpty()) {
+            setStatus("请先在地图上选择至少一个目标点")
+            return
+        }
+        val startYaw = kotlin.math.atan2(points.first().y - start.y, points.first().x - start.x)
+        val payloadPoints = JSONArray()
+        points.forEachIndexed { index, point ->
+            val next = when {
+                index < points.lastIndex -> points[index + 1]
+                index > 0 -> point
+                else -> point
+            }
+            val yaw = if (index < points.lastIndex) {
+                kotlin.math.atan2(next.y - point.y, next.x - point.x)
+            } else if (index > 0) {
+                kotlin.math.atan2(point.y - points[index - 1].y, point.x - points[index - 1].x)
+            } else 0.0
+            payloadPoints.put(JSONObject().apply {
+                put("x", point.x)
+                put("y", point.y)
+                put("yaw", yaw)
+            })
+        }
+        parkingMapView?.setWaypointEditMode(false)
+        val payload = JSONObject().apply {
+            put("start", JSONObject().apply {
+                put("x", start.x)
+                put("y", start.y)
+                put("yaw", startYaw)
+            })
+            put("points", payloadPoints)
+        }
+        sendPostJson(
+            api().navigationWaypointsUrl(),
+            payload.toString(),
+            "向当前导航算法提交起点 S 和 ${points.size} 个目标点",
+            readTimeoutMillis = 8000
+        )
     }
 
     private fun parkingRouteStatus(): LinearLayout = parkingMetricBand(listOf(
@@ -1744,20 +1978,98 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         setPadding(0, dp(4), 0, 0)
         layoutParams = matchWrapParams(bottom = 12)
-        addView(parkingSectionTitle("导航工具", "先建图并校准位姿，再启动自动导航"))
+        addView(parkingSectionTitle("自动建图与导航", "按手册顺序自动启动 ROS 节点；建图时请到驾驶页低速扫描环境"))
         val actions = listOf(
-            Triple("停车场建图", "SLAM · 启动 Gmapping", { sendGet(api().startTaskUrl("map_gmapping"), "启动建图") }),
-            Triple("显示建图地图", "查看当前扫描与闭环结果", { sendGet(api().startTaskUrl("map_display"), "显示建图地图") }),
-            Triple("保存停车场地图", "保存 pgm 与 yaml 地图文件", { sendGet(api().startTaskUrl("map_save"), "保存地图") }),
-            Triple("导航准备", "启动雷达、底盘与 Nav2", { sendGet(api().startTaskUrl("nav_laser"), "启动雷达与底盘") }),
-            Triple("目标点与路径规划", "发布初始位姿和目标点", { showParkingGoalSheet() })
+            Triple("一键开始自动建图", "m1 内置底盘驱动，执行 m1 → m2 启动建图", {
+                sendGet(api().automaticMappingStartUrl(), "自动建图", readTimeoutMillis = 15000)
+            }),
+            Triple("保存地图并结束建图", "执行 m4 保存 pgm/yaml，再关闭建图节点", {
+                sendGet(api().automaticMappingSaveUrl(), "保存地图", readTimeoutMillis = 40000)
+            })
         )
         actions.forEach { action ->
             addView(parkingActionRow(action.first, action.second, action.third))
         }
-        addView(parkingPrimaryButton("开始 B2 自动巡逻") {
-            sendGet(api().startTaskUrl("nav_dwa"), "启动 DWA 巡逻")
-        }, matchWrapParams(top = 12).apply { height = dp(54) })
+        addView(parkingSectionTitle("导航算法", "DWA/TEB/A*+RPP 各自启动 n1、n2 与所选算法；路线提交不会重复启动"), matchWrapParams(top = 14))
+        val algorithms = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("DWA\nn3") {
+                sendGet(api().automaticNavigationStartUrl("dwa"), "启动 DWA 自动导航", readTimeoutMillis = 20000)
+            }, LinearLayout.LayoutParams(0, dp(56), 1f))
+            addView(parkingOutlineButton("TEB\nn4") {
+                sendGet(api().automaticNavigationStartUrl("teb"), "启动 TEB 自动导航", readTimeoutMillis = 20000)
+            }, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(8), 0, 0, 0) })
+            addView(parkingPrimaryButton("A* + RPP\nn5") {
+                sendGet(api().automaticNavigationStartUrl("astar_rpp"), "启动 A* + RPP 自动导航", readTimeoutMillis = 20000)
+            }, LinearLayout.LayoutParams(0, dp(56), 1f).apply { setMargins(dp(8), 0, 0, 0) })
+        }
+        addView(algorithms, matchWrapParams(top = 10))
+        addView(parkingActionRow("目标点与路径规划", "发布初始位姿和目标点", { showParkingGoalSheet() }), matchWrapParams(top = 7))
+        val workflowActions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("刷新运行状态") {
+                sendGet(api().automationStatusUrl(), "刷新自动建图与导航状态")
+            }, LinearLayout.LayoutParams(0, dp(50), 1f))
+            addView(dangerButton("停止自动导航") {
+                sendGet(api().automaticNavigationStopUrl(), "停止自动导航", executorService = stopExecutor)
+            }, LinearLayout.LayoutParams(0, dp(50), 1f).apply { setMargins(dp(9), 0, 0, 0) })
+        }
+        addView(workflowActions, matchWrapParams(top = 12))
+    }
+
+    private fun parkingContainerSelector(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(palette.surface, palette.border, 18)
+        setPadding(dp(14), dp(13), dp(14), dp(13))
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("ROS 容器", "输入 docker ps 中的容器 ID 或名称，切换前会停止当前建图与导航任务"))
+
+        val containerInput = EditText(this@MainActivity).apply {
+            setText(currentRosContainer)
+            hint = "例如 8b98 或 ed97"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            background = roundedBackground(palette.surfaceAlt, palette.border, 14)
+            setTextColor(color(palette.textPrimary))
+            setHintTextColor(color(palette.textSecondary))
+            textSize = 13f
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        val containerState = TextView(this@MainActivity).apply {
+            text = "当前选择 · $currentRosContainer"
+            setTextColor(color(palette.textSecondary))
+            textSize = 10f
+        }
+        val controls = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(containerInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(parkingPrimaryButton("应用容器") {
+                val selected = containerInput.text.toString().trim()
+                if (selected.isBlank()) {
+                    setStatus("请输入 ROS 容器 ID 或名称")
+                } else {
+                    currentRosContainer = selected
+                    containerState.text = "当前选择 · $selected"
+                    sendGet(api().selectContainerUrl(selected), "切换 ROS 容器 $selected", readTimeoutMillis = 15000)
+                }
+            }, LinearLayout.LayoutParams(dp(112), dp(48)).apply { setMargins(dp(9), 0, 0, 0) })
+        }
+        addView(controls, matchWrapParams(top = 11))
+
+        val statusActions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(containerState, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = "检查状态 ›"
+                setTextColor(color(palette.accentText))
+                textSize = 10f
+                isClickable = true
+                setOnClickListener { sendGet(api().containerStatusUrl(), "检查 ROS 容器") }
+            })
+        }
+        addView(statusActions, matchWrapParams(top = 9))
     }
 
     private fun parkingActionRow(title: String, subtitle: String, action: () -> Unit): LinearLayout =
@@ -3083,6 +3395,7 @@ class MainActivity : Activity() {
         label: String,
         quiet: Boolean = false,
         executorService: ExecutorService = commandExecutor,
+        readTimeoutMillis: Int = if (quiet) 1200 else 5000,
         onFinished: () -> Unit = {},
         onLatencyMillis: ((Long) -> Unit)? = null
     ) {
@@ -3100,7 +3413,7 @@ class MainActivity : Activity() {
                 val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 2500
-                    readTimeout = if (quiet) 1200 else 5000
+                    readTimeout = readTimeoutMillis
                 }
                 val code = connection.responseCode
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
@@ -3125,6 +3438,43 @@ class MainActivity : Activity() {
                 }
             }
             onFinished()
+        }
+    }
+
+    private fun sendPostJson(
+        url: String,
+        jsonBody: String,
+        label: String,
+        readTimeoutMillis: Int = 8000
+    ) {
+        setStatus("$label 请求中")
+        commandExecutor.execute {
+            val result = runCatching {
+                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 2500
+                    readTimeout = readTimeoutMillis
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                connection.outputStream.use { output ->
+                    output.write(jsonBody.toByteArray(Charsets.UTF_8))
+                }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.use { input ->
+                    BufferedReader(InputStreamReader(input)).readText()
+                }.orEmpty()
+                connection.disconnect()
+                "HTTP $code ${body.take(220)}"
+            }.getOrElse { error ->
+                "失败：${error.message ?: error.javaClass.simpleName}"
+            }
+            runOnUiThread {
+                updateVehicleConnection(result.startsWith("HTTP "))
+                setStatus("$label $result")
+                appendLog("$label\n$result")
+            }
         }
     }
 

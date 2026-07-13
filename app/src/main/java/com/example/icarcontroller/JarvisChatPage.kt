@@ -181,7 +181,11 @@ class JarvisChatPage(
                     rounded(palette.accentSoft, palette.border, 8)
                 } else null
                 setOnClickListener {
-                    requestConversationChange { switchConversation(conversation.id) }
+                    if (showArchived) {
+                        showConversationActions(conversation, true)
+                    } else {
+                        requestConversationChange { switchConversation(conversation.id) }
+                    }
                 }
                 setOnLongClickListener {
                     showConversationActions(conversation, showArchived)

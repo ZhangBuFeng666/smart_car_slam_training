@@ -383,6 +383,110 @@ class MotionRouteTest(unittest.TestCase):
             body,
         )
 
+    def test_notify_route_speaks_known_parking_event(self):
+        calls = []
+
+        with patch.object(server, "speak_text", side_effect=lambda text: {"ok": True, "text": text}) as speak_mock:
+            status, body = self.handler.route("notify/patrol_start", {})
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual("patrol_start", body["event"])
+        speak_mock.assert_called_once_with("开始停车场巡逻，请注意避让。")
+
+    def test_speak_route_accepts_json_body_text(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/speak"
+        payload = '{"text":"开始巡逻"}'.encode("utf-8")
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = FakeRequestBody(payload)
+        captured = {}
+        handler.reply = lambda status, body: captured.update({"status": status, "body": body})
+
+        with patch.object(server, "speak_text", return_value={"ok": True, "text": "开始巡逻"}):
+            handler.do_POST()
+
+        self.assertEqual(200, captured["status"])
+        self.assertTrue(captured["body"]["ok"])
+        self.assertEqual("开始巡逻", captured["body"]["text"])
+
+    def test_speak_route_accepts_voice_rate_and_pitch(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/speak"
+        payload = json.dumps({
+            "text": "开始巡逻",
+            "voice": "zh-CN-YunyangNeural",
+            "rate": "+8%",
+            "pitch": "+2Hz",
+        }).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = FakeRequestBody(payload)
+        captured = {}
+        handler.reply = lambda status, body: captured.update({"status": status, "body": body})
+
+        with patch.object(server, "speak_text", return_value={"ok": True, "text": "开始巡逻"}) as speak_mock:
+            handler.do_POST()
+
+        self.assertEqual(200, captured["status"])
+        speak_mock.assert_called_once_with(
+            "开始巡逻",
+            voice="zh-CN-YunyangNeural",
+            rate="+8%",
+            pitch="+2Hz",
+        )
+
+    def test_speak_text_prefers_edge_tts_with_selected_voice(self):
+        server.SERVER_CONFIG["dry_run"] = False
+        run_calls = []
+
+        def fake_run(command, **_kwargs):
+            run_calls.append(command)
+            return FakeCompletedProcess(returncode=0)
+
+        with patch.object(server, "command_exists", return_value=True), patch.object(
+            server.subprocess, "run", side_effect=fake_run
+        ):
+            result = server.speak_text(
+                "开始巡逻",
+                voice="zh-CN-YunyangNeural",
+                rate="+8%",
+                pitch="+2Hz",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("edge-tts", result["engine"])
+        edge_calls = [command for command in run_calls if command and command[0] == "edge-tts"]
+        self.assertEqual(1, len(edge_calls))
+        self.assertIn("zh-CN-YunyangNeural", edge_calls[0])
+        self.assertIn("+8%", edge_calls[0])
+        self.assertIn("+2Hz", edge_calls[0])
+        ffplay_calls = [command for command in run_calls if command and command[0] == "ffplay"]
+        self.assertEqual(1, len(ffplay_calls))
+        self.assertTrue(ffplay_calls[0][-1].endswith(".mp3"))
+
+    def test_speak_text_falls_back_to_generated_wav_file_when_edge_tts_is_unavailable(self):
+        server.SERVER_CONFIG["dry_run"] = False
+        run_calls = []
+
+        def fake_run(command, **_kwargs):
+            run_calls.append(command)
+            return FakeCompletedProcess(returncode=0)
+
+        def fake_command_exists(command):
+            return command in {"espeak-ng", "paplay"}
+
+        with patch.object(server, "command_exists", side_effect=fake_command_exists), patch.object(
+            server.subprocess, "run", side_effect=fake_run
+        ):
+            result = server.speak_text("开始巡逻")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("espeak-ng", result["engine"])
+        paplay_calls = [command for command in run_calls if command and command[0] == "paplay"]
+        self.assertEqual(1, len(paplay_calls))
+        self.assertNotEqual("-", paplay_calls[0][-1])
+        self.assertTrue(paplay_calls[0][-1].endswith(".wav"))
+
     def test_emergency_stop_uses_persistent_bridge(self):
         bridge = FakeMotionBridge()
         server.MOTION_BRIDGE = bridge
@@ -428,6 +532,23 @@ class FakeProcessOutput:
 
     def readline(self):
         return self.lines.get(timeout=1.0)
+
+
+class FakeRequestBody:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self, size=-1):
+        if size < 0:
+            return self.payload
+        return self.payload[:size]
+
+
+class FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class FakeProcessInput:

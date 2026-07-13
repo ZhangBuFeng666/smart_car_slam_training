@@ -9,6 +9,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,11 @@ try:
     from .camera_stream import CameraCaptureService
 except ImportError:
     from camera_stream import CameraCaptureService
+
+
+USER_LOCAL_BIN = str(Path.home() / ".local" / "bin")
+if USER_LOCAL_BIN not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = USER_LOCAL_BIN + os.pathsep + os.environ.get("PATH", "")
 
 
 ROS_DOMAIN_ID = 32
@@ -81,6 +87,21 @@ STREAM_DISCONNECT_ERRNOS = {
     errno.ECONNRESET,
     errno.EPIPE,
     errno.ETIMEDOUT,
+}
+USB_AUDIO_SINK = "alsa_output.usb-C-Media_Electronics_Inc._USB_Audio_Device-00.analog-stereo"
+DEFAULT_TTS_VOICE = os.environ.get("ICAR_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+DEFAULT_TTS_RATE = os.environ.get("ICAR_TTS_RATE", "+0%")
+DEFAULT_TTS_PITCH = os.environ.get("ICAR_TTS_PITCH", "+0Hz")
+NOTIFICATION_MESSAGES = {
+    "connected": "小车服务已连接。",
+    "drive_ready": "驾驶模式已就绪。",
+    "patrol_start": "开始停车场巡逻，请注意避让。",
+    "patrol_stop": "停车场巡逻已停止。",
+    "task_start": "实训功能已启动。",
+    "task_stop": "实训功能已停止。",
+    "camera_ready": "摄像头画面已打开。",
+    "emergency_stop": "急停已触发，小车已停止。",
+    "all_stop": "全部功能已停止。",
 }
 
 
@@ -398,6 +419,152 @@ def run_once(ros_command, timeout=8):
     return run_host(command, timeout=timeout)
 
 
+def command_exists(command):
+    return subprocess.run(
+        ["bash", "-lc", f"command -v {shlex.quote(command)}"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    ).returncode == 0
+
+
+def speak_text(text, voice=None, rate=None, pitch=None):
+    message = str(text or "").strip()
+    if not message:
+        return {"ok": False, "error": "text is required"}
+    if len(message) > 500:
+        message = message[:500]
+    selected_voice = str(voice or DEFAULT_TTS_VOICE).strip() or DEFAULT_TTS_VOICE
+    selected_rate = str(rate or DEFAULT_TTS_RATE).strip() or DEFAULT_TTS_RATE
+    selected_pitch = str(pitch or DEFAULT_TTS_PITCH).strip() or DEFAULT_TTS_PITCH
+    if SERVER_CONFIG["dry_run"]:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "text": message,
+            "engine": "edge-tts",
+            "voice": selected_voice,
+        }
+
+    prepare_audio_output()
+    if command_exists("edge-tts") and command_exists("ffplay"):
+        edge_result = speak_with_edge_tts(message, selected_voice, selected_rate, selected_pitch)
+        if edge_result.get("ok"):
+            return edge_result
+    else:
+        edge_result = {"ok": False, "error": "edge-tts or ffplay is not installed"}
+    fallback = speak_with_espeak(message)
+    if fallback.get("ok"):
+        fallback["fallback_from"] = edge_result.get("error", "edge-tts failed")
+    return fallback
+
+
+def prepare_audio_output():
+    subprocess.run(
+        ["pactl", "set-default-sink", USB_AUDIO_SINK],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    subprocess.run(
+        ["pactl", "set-sink-volume", USB_AUDIO_SINK, "85%"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+
+def speak_with_edge_tts(message, voice, rate, pitch):
+    mp3_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="icar_speech_", suffix=".mp3", delete=False) as mp3_file:
+            mp3_path = mp3_file.name
+        tts = subprocess.run(
+            [
+                "edge-tts",
+                "--voice",
+                voice,
+                "--rate",
+                rate,
+                "--pitch",
+                pitch,
+                "--text",
+                message,
+                "--write-media",
+                mp3_path,
+            ],
+            capture_output=True,
+            timeout=25,
+        )
+        if tts.returncode != 0:
+            return {"ok": False, "text": message, "engine": "edge-tts", "error": decode_process_error(tts.stderr)}
+        player = subprocess.run(
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", mp3_path],
+            capture_output=True,
+            timeout=25,
+        )
+        if player.returncode != 0:
+            return {"ok": False, "text": message, "engine": "edge-tts", "error": decode_process_error(player.stderr)}
+        return {"ok": True, "text": message, "engine": "edge-tts", "voice": voice}
+    except Exception as error:
+        return {"ok": False, "text": message, "engine": "edge-tts", "error": str(error)}
+    finally:
+        if mp3_path:
+            try:
+                os.unlink(mp3_path)
+            except OSError:
+                pass
+
+
+def speak_with_espeak(message):
+    if not command_exists("espeak-ng"):
+        return {"ok": False, "text": message, "engine": "espeak-ng", "error": "espeak-ng is not installed"}
+    wav_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="icar_speech_", suffix=".wav", delete=False) as wav_file:
+            wav_path = wav_file.name
+            tts = subprocess.run(
+                ["espeak-ng", "-v", "zh", "-s", "155", "--stdout", message],
+                stdout=wav_file,
+                stderr=subprocess.PIPE,
+                timeout=8,
+            )
+        if tts.returncode != 0:
+            return {
+                "ok": False,
+                "text": message,
+                "engine": "espeak-ng",
+                "error": decode_process_error(tts.stderr),
+            }
+        player = subprocess.run(
+            ["paplay", f"--device={USB_AUDIO_SINK}", wav_path],
+            capture_output=True,
+            timeout=12,
+        )
+        if player.returncode != 0:
+            return {
+                "ok": False,
+                "text": message,
+                "engine": "espeak-ng",
+                "error": decode_process_error(player.stderr),
+            }
+        return {"ok": True, "text": message, "engine": "espeak-ng"}
+    except Exception as error:
+        return {"ok": False, "text": message, "engine": "espeak-ng", "error": str(error)}
+    finally:
+        if wav_path:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+
+def decode_process_error(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")[-300:]
+    return str(value or "")[-300:]
+
+
 def container_is_running():
     result = run_host(
         ["docker", "inspect", "-f", "{{.State.Running}}", SERVER_CONFIG["container"]],
@@ -529,6 +696,42 @@ class Handler(BaseHTTPRequestHandler):
             status, body = 500, {"error": str(error)}
         self.reply(status, body)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.strip("/")
+        try:
+            if path == "speak":
+                status, body = self.handle_speak_post()
+            elif path.startswith("notify/"):
+                status, body = self.route(path, {})
+            else:
+                status, body = 404, {"error": f"unknown endpoint: /{path}"}
+        except ValueError as error:
+            status, body = 400, {"error": str(error)}
+        except Exception as error:
+            status, body = 500, {"error": str(error)}
+        self.reply(status, body)
+
+    def handle_speak_post(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("Content-Length must be an integer")
+        if length <= 0:
+            raise ValueError("request body is required")
+        if length > 2048:
+            raise ValueError("request body is too large")
+        payload = self.rfile.read(length).decode("utf-8")
+        data = json.loads(payload)
+        text = data.get("text", "")
+        result = speak_text(
+            text,
+            voice=data.get("voice"),
+            rate=data.get("rate"),
+            pitch=data.get("pitch"),
+        )
+        return (200 if result.get("ok") else 503), result
+
     def stream_camera(self):
         camera_stream = CAMERA_STREAM
         if camera_stream is None:
@@ -603,6 +806,14 @@ class Handler(BaseHTTPRequestHandler):
             if CAMERA_STREAM is None:
                 return 503, {"state": "unavailable", "error": "camera service unavailable"}
             return 200, CAMERA_STREAM.restart()
+        if path.startswith("notify/"):
+            event = unquote(path.split("/", 1)[1])
+            text = NOTIFICATION_MESSAGES.get(event)
+            if text is None:
+                return 404, {"error": f"unknown notification: {event}"}
+            result = speak_text(text)
+            result["event"] = event
+            return (200 if result.get("ok") else 503), result
         if path == "health":
             return 200, {
                 "ok": True,

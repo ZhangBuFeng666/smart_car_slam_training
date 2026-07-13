@@ -54,6 +54,14 @@ public class CarApiTest {
     }
 
     @Test
+    public void buildsVoiceNotificationUrls() {
+        CarApi api = new CarApi("10.161.57.230", 8000);
+
+        assertEquals("http://10.161.57.230:8000/speak", api.speakUrl());
+        assertEquals("http://10.161.57.230:8000/notify/patrol_start", api.notifyUrl("patrol_start"));
+    }
+
+    @Test
     public void cameraUrlsShareTheNormalizedBaseUrl() {
         CarApi api = new CarApi("  https://10.161.57.230///  ", 8000);
 

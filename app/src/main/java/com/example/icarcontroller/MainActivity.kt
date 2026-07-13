@@ -96,6 +96,7 @@ class MainActivity : Activity() {
     private val commandExecutor = Executors.newSingleThreadExecutor()
     private val moveExecutor = Executors.newSingleThreadExecutor()
     private val stopExecutor = Executors.newSingleThreadExecutor()
+    private val voiceExecutor = Executors.newSingleThreadExecutor()
     private val moveGate = RequestGate()
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
 
@@ -186,6 +187,7 @@ class MainActivity : Activity() {
         commandExecutor.shutdownNow()
         moveExecutor.shutdown()
         stopExecutor.shutdown()
+        voiceExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -3117,9 +3119,53 @@ class MainActivity : Activity() {
                     updateVehicleConnection(result.startsWith("HTTP "))
                     setStatus("$label $result")
                     appendLog("$label\n$result")
+                    if (result.startsWith("HTTP 2")) {
+                        notificationEventForLabel(label)?.let { event -> sendNotification(event) }
+                    }
                 }
             }
             onFinished()
+        }
+    }
+
+    private fun notificationEventForLabel(label: String): String? = when {
+        label.contains("急停") -> "emergency_stop"
+        label.contains("全部停止") -> "all_stop"
+        label.contains("检测连接") -> "connected"
+        label.contains("驾驶") || label.contains("底盘") -> "drive_ready"
+        label.contains("巡逻") && label.contains("停止") -> "patrol_stop"
+        label.contains("巡逻") && label.contains("启动") -> "patrol_start"
+        label.contains("启动相机") -> "camera_ready"
+        label.contains("启动") -> "task_start"
+        label.contains("停止") -> "task_stop"
+        else -> null
+    }
+
+    private fun sendNotification(event: String) {
+        val url = api().notifyUrl(event)
+        voiceExecutor.execute {
+            runCatching {
+                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 800
+                    readTimeout = 2500
+                    doOutput = true
+                }
+                connection.outputStream.use { output -> output.write(ByteArray(0)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.use { input ->
+                    BufferedReader(InputStreamReader(input)).readText()
+                }.orEmpty()
+                connection.disconnect()
+                if (code !in 200..299) {
+                    runOnUiThread { appendLog("语音通知失败\nHTTP $code ${body.take(120)}") }
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    appendLog("语音通知失败\n${error.message ?: error.javaClass.simpleName}")
+                }
+            }
         }
     }
 

@@ -13,6 +13,7 @@ data class ArrowTurnStatus(
 )
 
 object ArrowTurnStatusParser {
+    @JvmStatic
     fun parse(json: String): ArrowTurnStatus {
         val root = JSONObject(json)
         return ArrowTurnStatus(
@@ -34,6 +35,7 @@ object ArrowTurnStatusParser {
 }
 
 object ArrowTurnUiSpec {
+    @JvmStatic
     fun statusText(status: ArrowTurnStatus): String {
         if (!status.running && status.phase.isNullOrBlank()) {
             return status.error ?: "未运行"

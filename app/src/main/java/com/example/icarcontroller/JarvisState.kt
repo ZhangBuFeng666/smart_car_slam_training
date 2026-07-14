@@ -21,7 +21,8 @@ data class JarvisViewState(
     val loading: Boolean,
     val errorMessage: String?,
     val chatItems: List<JarvisChatItem>,
-    val emergencyStopAvailable: Boolean
+    val emergencyStopAvailable: Boolean,
+    val locallyStoppedControlTaskIds: Set<String>
 ) {
     companion object {
         @JvmStatic
@@ -36,14 +37,19 @@ data class JarvisViewState(
                 loading = false,
                 errorMessage = null,
                 chatItems = emptyList(),
-                emergencyStopAvailable = true
+                emergencyStopAvailable = true,
+                locallyStoppedControlTaskIds = emptySet()
             )
     }
 }
 
 sealed class JarvisChatItem {
     data class UserMessage(val text: String, val timestamp: String) : JarvisChatItem()
-    data class AssistantMessage(val text: String, val timestamp: String) : JarvisChatItem()
+    data class AssistantMessage @JvmOverloads constructor(
+        val text: String,
+        val timestamp: String,
+        val spokenText: String? = null
+    ) : JarvisChatItem()
     data class PlanCard(val plan: JarvisMissionPlan, val timestamp: String) : JarvisChatItem()
     data class ControlTaskCard(val task: JarvisControlTask, val timestamp: String) : JarvisChatItem()
     data class ProgressCard(
@@ -61,9 +67,14 @@ sealed class JarvisEvent {
     object ConfirmationStarted : JarvisEvent()
     data class UserMessageSubmitted(val message: String) : JarvisEvent()
     data class SystemMessageAdded(val message: String) : JarvisEvent()
-    data class ChatReply(val message: String) : JarvisEvent()
+    data class ChatReply @JvmOverloads constructor(
+        val message: String,
+        val spokenMessage: String? = null
+    ) : JarvisEvent()
     data class ControlTaskReady(val task: JarvisControlTask) : JarvisEvent()
     data class ControlTaskUpdated(val task: JarvisControlTask) : JarvisEvent()
+    data class ControlTaskLocallyStopped(val taskId: String) : JarvisEvent()
+    data class ControlTaskRestartRequested(val taskId: String) : JarvisEvent()
     data class PlanReady(val plan: JarvisMissionPlan) : JarvisEvent()
     data class MissionUpdated(
         val mission: JarvisMission,
@@ -105,7 +116,11 @@ object JarvisReducer {
                 loading = false,
                 errorMessage = null,
                 chatItems = withoutTrailingLoading(state.chatItems) +
-                    JarvisChatItem.AssistantMessage(event.message, timestamp())
+                    JarvisChatItem.AssistantMessage(
+                        event.message,
+                        timestamp(),
+                        event.spokenMessage
+                    )
             )
             is JarvisEvent.ControlTaskReady -> state.copy(
                 mode = JarvisScreenMode.IDLE,
@@ -118,9 +133,40 @@ object JarvisReducer {
                 loading = false,
                 chatItems = state.chatItems.map {
                     if (it is JarvisChatItem.ControlTaskCard && it.task.id == event.task.id) {
-                        JarvisChatItem.ControlTaskCard(event.task, it.timestamp)
+                        if (
+                            event.task.id in state.locallyStoppedControlTaskIds &&
+                            event.task.state in setOf(
+                                JarvisControlTaskState.PREPARING,
+                                JarvisControlTaskState.STARTING,
+                                JarvisControlTaskState.RUNNING,
+                                JarvisControlTaskState.READY
+                            )
+                        ) {
+                            it
+                        } else {
+                            JarvisChatItem.ControlTaskCard(event.task, it.timestamp)
+                        }
                     } else it
                 }
+            )
+            is JarvisEvent.ControlTaskLocallyStopped -> state.copy(
+                loading = false,
+                locallyStoppedControlTaskIds = state.locallyStoppedControlTaskIds + event.taskId,
+                chatItems = state.chatItems.map {
+                    if (it is JarvisChatItem.ControlTaskCard && it.task.id == event.taskId) {
+                        JarvisChatItem.ControlTaskCard(
+                            it.task.copy(
+                                state = JarvisControlTaskState.STOPPED,
+                                currentMessage = "任务已停止",
+                                result = "已停止"
+                            ),
+                            it.timestamp
+                        )
+                    } else it
+                }
+            )
+            is JarvisEvent.ControlTaskRestartRequested -> state.copy(
+                locallyStoppedControlTaskIds = state.locallyStoppedControlTaskIds - event.taskId
             )
             is JarvisEvent.PlanReady -> state.copy(
                 mode = JarvisScreenMode.PLAN_READY,

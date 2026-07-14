@@ -508,6 +508,10 @@ class MainActivity : Activity() {
             executor = commandExecutor,
             conversations = jarvisConversationController,
             onStatus = { status -> setStatus(status) },
+            onCancelLocalMotion = { stopMove() },
+            onForceStopControl = {
+                sendGet(api().stopAllUrl(), "停止全部", executorService = stopExecutor)
+            },
             onEmergencyStop = {
                 sendGet(api().emergencyStopUrl(), "急停", executorService = stopExecutor)
             }

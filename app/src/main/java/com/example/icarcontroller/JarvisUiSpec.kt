@@ -20,5 +20,12 @@ object JarvisUiSpec {
     fun dangerAction(): String = "急停"
 
     @JvmStatic
+    fun speechToggleDescription(enabled: Boolean): String =
+        if (enabled) "语音播报已开启" else "语音播报已关闭"
+
+    @JvmStatic
+    fun canReplaySpeech(spokenText: String?): Boolean = !spokenText.isNullOrBlank()
+
+    @JvmStatic
     fun quickPrompts(): List<String> = listOf("检查状态", "打开摄像头", "开始巡检", "生成报告")
 }

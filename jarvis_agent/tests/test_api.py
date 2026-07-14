@@ -1,17 +1,20 @@
 from pathlib import Path
+import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from jarvis_agent.api import create_app
 from jarvis_agent.config import Settings
 from jarvis_agent.deepseek import ModelResponseError
-from jarvis_agent.models import Action, MissionPlan, MissionStep
+from jarvis_agent.models import Action, AssistantReply, MissionPlan, MissionStep
 
 
 class FakePlanner:
     def __init__(self):
         self.calls = []
+        self.reply_calls = []
 
     async def plan(self, message, context):
         self.calls.append((message, context))
@@ -24,7 +27,41 @@ class FakePlanner:
         )
 
     async def reply(self, message, context):
-        return "你好，我在。有什么可以帮你？"
+        self.reply_calls.append((message, context))
+        return AssistantReply(
+            reply="你好，我在。有什么可以帮你？",
+            spoken_reply="你好，我在。有什么可以帮你？",
+        )
+
+
+class FakeVision:
+    def __init__(self, scene=None):
+        self.started = 0
+        self.stopped = 0
+        self.scene = scene or {
+            "state": "LIVE",
+            "observed_at": 10.0,
+            "summary": {"total": 0, "by_class": {}},
+            "objects": [],
+            "recent_objects": [],
+            "error": None,
+        }
+
+    def start(self):
+        self.started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def snapshot(self):
+        return dict(self.scene)
+
+    def health(self):
+        return {
+            "state": self.scene["state"],
+            "updated_at": self.scene.get("observed_at"),
+            "error": self.scene.get("error"),
+        }
 
 
 class InvalidPlanner:
@@ -60,6 +97,10 @@ class FakeControl:
         self.calls.append(("move", direction, speed, turn))
         return {"ok": True, "direction": direction}
 
+    async def enqueue_speech(self, text, request_id):
+        self.calls.append(("speech", text, request_id))
+        return {"ok": True, "state": "queued", "request_id": request_id}
+
 
 class FailingOnceControl(FakeControl):
     def __init__(self):
@@ -72,6 +113,20 @@ class FailingOnceControl(FakeControl):
             self.fail_health = False
             raise RuntimeError("offline")
         return {"ok": True}
+
+
+class BlockingFeatureControl(FakeControl):
+    def __init__(self):
+        super().__init__()
+        self.feature_started = threading.Event()
+        self.release_feature = threading.Event()
+
+    async def start_task(self, task):
+        self.calls.append(("start", task))
+        if task == "follow":
+            self.feature_started.set()
+            self.release_feature.wait(timeout=2.0)
+        return {"started": task}
 
 
 def client(tmp_path):
@@ -118,6 +173,104 @@ def test_health_remains_public(tmp_path):
     assert response.json()["status"] == "ok"
 
 
+def test_scene_requires_auth_and_returns_all_objects(tmp_path):
+    scene = {
+        "state": "LIVE",
+        "observed_at": 10.0,
+        "summary": {"total": 2, "by_class": {"car": 1, "no_parking_sign": 1}},
+        "objects": [
+            {"track_id": "car-1", "label": "car"},
+            {"track_id": "sign-1", "label": "no_parking_sign"},
+        ],
+        "recent_objects": [],
+        "error": None,
+    }
+    vision = FakeVision(scene)
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    app = create_app(
+        settings=settings,
+        planner=FakePlanner(),
+        control=FakeControl(),
+        vision=vision,
+    )
+
+    with TestClient(app) as test_client:
+        assert test_client.get("/api/v1/scene").status_code == 401
+        response = test_client.get("/api/v1/scene", headers=auth())
+
+    assert response.status_code == 200
+    assert len(response.json()["objects"]) == 2
+    assert vision.started == 1
+    assert vision.stopped == 1
+
+
+def test_chat_and_plan_receive_scene_context(tmp_path):
+    planner = FakePlanner()
+    vision = FakeVision(
+        {
+            "state": "LIVE",
+            "observed_at": 10.0,
+            "summary": {"total": 1, "by_class": {"car": 1}},
+            "objects": [{"track_id": "car-1", "label": "car"}],
+            "recent_objects": [],
+            "error": None,
+        }
+    )
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    app = create_app(
+        settings=settings,
+        planner=planner,
+        control=FakeControl(),
+        vision=vision,
+    )
+
+    with TestClient(app) as test_client:
+        reply = test_client.post(
+            "/api/v1/chat",
+            headers=auth(),
+            json={"message": "what do you see", "context": {"screen": "ai"}},
+        )
+        plan = test_client.post(
+            "/api/v1/chat",
+            headers=auth(),
+            json={"message": "create plan", "context": {"screen": "ai"}},
+        )
+
+    assert reply.status_code == 200
+    assert plan.status_code == 200
+    assert planner.reply_calls[0][1]["vision"]["objects"][0]["label"] == "car"
+    assert planner.calls[0][1]["vision"]["objects"][0]["label"] == "car"
+    assert planner.reply_calls[0][1]["screen"] == "ai"
+
+
+def test_health_exposes_only_vision_status_metadata(tmp_path):
+    vision = FakeVision()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    app = create_app(
+        settings=settings,
+        planner=FakePlanner(),
+        control=FakeControl(),
+        vision=vision,
+    )
+
+    with TestClient(app) as test_client:
+        body = test_client.get("/health").json()
+
+    assert body["vision_state"] == "LIVE"
+    assert body["vision_updated_at"] == 10.0
+    assert body["vision_error"] is None
+    assert "objects" not in body
+
+
 def test_protected_route_requires_token(tmp_path):
     test_client, _ = client(tmp_path)
 
@@ -160,6 +313,23 @@ def test_chat_greeting_returns_reply_without_plan(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"reply": "你好，我在。有什么可以帮你？"}
     assert planner.calls == []
+
+
+def test_chat_enqueues_spoken_reply_when_enabled(tmp_path):
+    test_client, control = client(tmp_path)
+
+    response = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "你好", "context": {}, "speech_enabled": True},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["reply"] == "你好，我在。有什么可以帮你？"
+    assert body["spoken_reply"] == "你好，我在。有什么可以帮你？"
+    assert body["speech"]["state"] == "queued"
+    assert control.calls[0][0:2] == ("speech", "你好，我在。有什么可以帮你？")
 
 
 def test_chat_only_plans_when_explicitly_requested(tmp_path):
@@ -209,17 +379,9 @@ def test_chat_directly_starts_avoidance_with_dependencies(tmp_path):
         headers=auth(),
     )
     assert started.status_code == 200
-    for _ in range(20):
-        status = test_client.get(
-            "/api/v1/control-tasks/%s" % task_id,
-            headers=auth(),
-        ).json()
-        if status["state"] == "COMPLETED":
-            break
-        import time
-        time.sleep(0.01)
+    status = wait_for_control_state(test_client, task_id, "RUNNING")
 
-    assert status["result"] == "已成功开启自动避障功能。"
+    assert status["result"] == "自动避障功能正在运行。"
     assert control.calls == [
         ("health", None),
         ("start", "base"),
@@ -246,6 +408,158 @@ def test_chat_directly_starts_follow_and_warning(tmp_path):
     wait_for_control_state(test_client, warning.json()["control_task"]["id"], "READY")
     assert ("start", "follow") not in control.calls
     assert ("start", "warning") not in control.calls
+
+
+def test_persistent_feature_remains_running_until_stopped(tmp_path):
+    test_client, control = client(tmp_path)
+    created = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "enable follow", "context": {}},
+    ).json()["control_task"]
+    wait_for_control_state(test_client, created["id"], "READY")
+
+    test_client.post(
+        "/api/v1/control-tasks/%s/start" % created["id"],
+        headers=auth(),
+    )
+    running = wait_for_control_state(test_client, created["id"], "RUNNING")
+    time.sleep(0.05)
+
+    assert running["state"] == "RUNNING"
+    assert test_client.get(
+        "/api/v1/control-tasks/%s" % created["id"], headers=auth()
+    ).json()["state"] == "RUNNING"
+    assert ("start", "follow") in control.calls
+
+
+def test_natural_language_stop_synchronizes_running_feature_task(tmp_path):
+    test_client, control = client(tmp_path)
+    created = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "enable follow", "context": {}},
+    ).json()["control_task"]
+    wait_for_control_state(test_client, created["id"], "READY")
+    test_client.post(
+        "/api/v1/control-tasks/%s/start" % created["id"], headers=auth()
+    )
+    wait_for_control_state(test_client, created["id"], "RUNNING")
+
+    stopped = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "disable follow", "context": {}},
+    )
+
+    assert stopped.status_code == 200
+    assert test_client.get(
+        "/api/v1/control-tasks/%s" % created["id"], headers=auth()
+    ).json()["state"] == "STOPPED"
+    assert ("stop", "follow") in control.calls
+
+
+def test_duplicate_feature_start_reuses_active_control_task(tmp_path):
+    test_client, _ = client(tmp_path)
+    first = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "enable camera", "context": {}},
+    ).json()["control_task"]
+    wait_for_control_state(test_client, first["id"], "READY")
+
+    second = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "start camera", "context": {}},
+    ).json()["control_task"]
+
+    assert second["id"] == first["id"]
+
+
+@pytest.mark.parametrize(
+    ("message", "task_name"),
+    [
+        ("enable base", "base"),
+        ("enable lidar", "lidar"),
+        ("enable avoidance", "avoidance"),
+        ("enable follow", "follow"),
+        ("enable warning", "warning"),
+        ("enable camera", "camera"),
+        ("enable hsv", "hsv"),
+        ("enable color track", "color_track"),
+    ],
+)
+def test_all_persistent_features_remain_running(tmp_path, message, task_name):
+    test_client, control = client(tmp_path)
+    created = test_client.post(
+        "/api/v1/chat", headers=auth(), json={"message": message, "context": {}}
+    ).json()["control_task"]
+    wait_for_control_state(test_client, created["id"], "READY")
+
+    test_client.post(
+        "/api/v1/control-tasks/%s/start" % created["id"], headers=auth()
+    )
+
+    assert wait_for_control_state(test_client, created["id"], "RUNNING")["state"] == "RUNNING"
+    assert ("start", task_name) in control.calls
+
+
+def test_stop_all_synchronizes_every_active_control_task(tmp_path):
+    test_client, control = client(tmp_path)
+    task_ids = []
+    for message in ("enable follow", "enable camera"):
+        task = test_client.post(
+            "/api/v1/chat", headers=auth(), json={"message": message, "context": {}}
+        ).json()["control_task"]
+        task_ids.append(task["id"])
+        wait_for_control_state(test_client, task["id"], "READY")
+        test_client.post(
+            "/api/v1/control-tasks/%s/start" % task["id"], headers=auth()
+        )
+        wait_for_control_state(test_client, task["id"], "RUNNING")
+
+    response = test_client.post(
+        "/api/v1/chat", headers=auth(), json={"message": "stop all", "context": {}}
+    )
+
+    assert response.status_code == 200
+    assert ("stop_all", None) in control.calls
+    for task_id in task_ids:
+        assert test_client.get(
+            "/api/v1/control-tasks/%s" % task_id, headers=auth()
+        ).json()["state"] == "STOPPED"
+
+
+def test_stop_during_feature_start_cannot_restore_running_state(tmp_path):
+    control = BlockingFeatureControl()
+    settings = Settings(
+        jarvis_app_token="test-token",
+        database_path=str(tmp_path / "jarvis.db"),
+    )
+    test_client = TestClient(
+        create_app(settings=settings, planner=FakePlanner(), control=control)
+    )
+    created = test_client.post(
+        "/api/v1/chat",
+        headers=auth(),
+        json={"message": "enable follow", "context": {}},
+    ).json()["control_task"]
+    wait_for_control_state(test_client, created["id"], "READY")
+    test_client.post(
+        "/api/v1/control-tasks/%s/start" % created["id"], headers=auth()
+    )
+    assert control.feature_started.wait(timeout=1.0)
+
+    test_client.post(
+        "/api/v1/control-tasks/%s/stop" % created["id"], headers=auth()
+    )
+    control.release_feature.set()
+    time.sleep(0.05)
+
+    assert test_client.get(
+        "/api/v1/control-tasks/%s" % created["id"], headers=auth()
+    ).json()["state"] == "STOPPED"
 
 
 def test_chat_executes_bounded_motion_and_forces_stop(tmp_path):

@@ -19,8 +19,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     from .camera_stream import CameraCaptureService
+    from .speech_queue import SpeechQueue
 except ImportError:
     from camera_stream import CameraCaptureService
+    from speech_queue import SpeechQueue
 
 
 USER_LOCAL_BIN = str(Path.home() / ".local" / "bin")
@@ -176,6 +178,7 @@ SERVER_CONFIG = {
 MOTION_BRIDGE = None
 NAVIGATION_BRIDGE = None
 CAMERA_STREAM = None
+SPEECH_QUEUE = None
 BASE_READY_CONTAINER = None
 AUTOMATION_LOCK = threading.Lock()
 BASE_START_LOCK = threading.Lock()
@@ -187,6 +190,8 @@ STREAM_DISCONNECT_ERRNOS = {
     errno.ETIMEDOUT,
 }
 USB_AUDIO_SINK = "alsa_output.usb-C-Media_Electronics_Inc._USB_Audio_Device-00.analog-stereo"
+USB_ALSA_CARD = os.environ.get("ICAR_USB_ALSA_CARD", "Device")
+USB_ALSA_DEVICE = os.environ.get("ICAR_USB_ALSA_DEVICE", "plughw:CARD=Device,DEV=0")
 DEFAULT_TTS_VOICE = os.environ.get("ICAR_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 DEFAULT_TTS_RATE = os.environ.get("ICAR_TTS_RATE", "+0%")
 DEFAULT_TTS_PITCH = os.environ.get("ICAR_TTS_PITCH", "+0Hz")
@@ -721,12 +726,12 @@ def speak_text(text, voice=None, rate=None, pitch=None):
         }
 
     prepare_audio_output()
-    if command_exists("edge-tts") and command_exists("ffplay"):
+    if all(command_exists(command) for command in ("edge-tts", "ffmpeg", "aplay")):
         edge_result = speak_with_edge_tts(message, selected_voice, selected_rate, selected_pitch)
         if edge_result.get("ok"):
             return edge_result
     else:
-        edge_result = {"ok": False, "error": "edge-tts or ffplay is not installed"}
+        edge_result = {"ok": False, "error": "edge-tts, ffmpeg, or aplay is not installed"}
     fallback = speak_with_espeak(message)
     if fallback.get("ok"):
         fallback["fallback_from"] = edge_result.get("error", "edge-tts failed")
@@ -734,6 +739,12 @@ def speak_text(text, voice=None, rate=None, pitch=None):
 
 
 def prepare_audio_output():
+    subprocess.run(
+        ["amixer", "-c", USB_ALSA_CARD, "set", "PCM", "100%", "unmute"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
     subprocess.run(
         ["pactl", "set-default-sink", USB_AUDIO_SINK],
         capture_output=True,
@@ -750,9 +761,12 @@ def prepare_audio_output():
 
 def speak_with_edge_tts(message, voice, rate, pitch):
     mp3_path = None
+    wav_path = None
     try:
         with tempfile.NamedTemporaryFile(prefix="icar_speech_", suffix=".mp3", delete=False) as mp3_file:
             mp3_path = mp3_file.name
+        with tempfile.NamedTemporaryFile(prefix="icar_speech_", suffix=".wav", delete=False) as wav_file:
+            wav_path = wav_file.name
         tts = subprocess.run(
             [
                 "edge-tts",
@@ -772,14 +786,44 @@ def speak_with_edge_tts(message, voice, rate, pitch):
         )
         if tts.returncode != 0:
             return {"ok": False, "text": message, "engine": "edge-tts", "error": decode_process_error(tts.stderr)}
+        conversion = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                mp3_path,
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                wav_path,
+            ],
+            capture_output=True,
+            timeout=25,
+        )
+        if conversion.returncode != 0:
+            return {
+                "ok": False,
+                "text": message,
+                "engine": "edge-tts",
+                "error": decode_process_error(conversion.stderr),
+            }
         player = subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", mp3_path],
+            ["aplay", "-D", USB_ALSA_DEVICE, wav_path],
             capture_output=True,
             timeout=25,
         )
         if player.returncode != 0:
             return {"ok": False, "text": message, "engine": "edge-tts", "error": decode_process_error(player.stderr)}
-        return {"ok": True, "text": message, "engine": "edge-tts", "voice": voice}
+        return {
+            "ok": True,
+            "text": message,
+            "engine": "edge-tts",
+            "voice": voice,
+            "output_device": USB_ALSA_DEVICE,
+        }
     except Exception as error:
         return {"ok": False, "text": message, "engine": "edge-tts", "error": str(error)}
     finally:
@@ -788,10 +832,15 @@ def speak_with_edge_tts(message, voice, rate, pitch):
                 os.unlink(mp3_path)
             except OSError:
                 pass
+        if wav_path:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
 
 def speak_with_espeak(message):
-    if not command_exists("espeak-ng"):
+    if not command_exists("espeak-ng") or not command_exists("aplay"):
         return {"ok": False, "text": message, "engine": "espeak-ng", "error": "espeak-ng is not installed"}
     wav_path = None
     try:
@@ -811,7 +860,7 @@ def speak_with_espeak(message):
                 "error": decode_process_error(tts.stderr),
             }
         player = subprocess.run(
-            ["paplay", f"--device={USB_AUDIO_SINK}", wav_path],
+            ["aplay", "-D", USB_ALSA_DEVICE, wav_path],
             capture_output=True,
             timeout=12,
         )
@@ -989,7 +1038,7 @@ def start_task(task):
     }
 
 
-def stop_task_batch(tasks):
+def stop_task_batch(tasks, preserve_patterns=()):
     global BASE_READY_CONTAINER
     ordered = list(dict.fromkeys(reversed(tuple(tasks))))
     if "base" in ordered:
@@ -1002,10 +1051,14 @@ def stop_task_batch(tasks):
             results.append({"task": task, "status": "dry_run"})
         return results
 
+    preserved = set(preserve_patterns)
     patterns = []
     for task in ordered:
-        patterns.append(TASK_PATTERNS[task])
-        patterns.extend(TASK_CLEANUP_PATTERNS.get(task, ()))
+        patterns.extend(
+            pattern
+            for pattern in (TASK_PATTERNS[task], *TASK_CLEANUP_PATTERNS.get(task, ()))
+            if pattern not in preserved
+        )
     combined = "|".join(
         safe_process_pattern(pattern) for pattern in dict.fromkeys(patterns)
     )
@@ -1025,7 +1078,7 @@ def stop_task_batch(tasks):
         "while read pid; do ps -o pgid= -p \"$pid\"; done | tr -d ' ' | sort -u); "
         "for pgid in $pgids; do kill -KILL -- -$pgid 2>/dev/null || true; done; true"
     )
-    result = run_once(stop_script, timeout=2)
+    result = run_once(stop_script, timeout=2) if combined else {"stdout": ""}
     results = []
     for task in ordered:
         process = RUNNING.get(task)
@@ -1064,6 +1117,20 @@ def stop_motion_safely():
             "bridge_error": str(error),
             "fallback": fallback,
         }
+
+
+def stop_lidar_motor_safely():
+    script = (
+        "python3 -c \"import serial,time; "
+        "port=serial.Serial('/dev/rplidar',115200,timeout=0.2); "
+        "port.dtr=True; time.sleep(0.5); port.close()\""
+    )
+    result = run_once(script, timeout=2)
+    return {
+        "ok": result.get("returncode") == 0,
+        "device": "/dev/rplidar",
+        "error": result.get("stderr", ""),
+    }
 
 
 def cancel_waypoints_safely():
@@ -1377,6 +1444,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "speak":
                 status, body = self.handle_speak_post()
+            elif path == "speech/enqueue":
+                status, body = self.handle_speech_enqueue_post()
             elif path == "navigation/waypoints":
                 status, body = self.handle_waypoints_post()
             elif path.startswith("notify/"):
@@ -1399,6 +1468,19 @@ class Handler(BaseHTTPRequestHandler):
             pitch=data.get("pitch"),
         )
         return (200 if result.get("ok") else 503), result
+
+    def handle_speech_enqueue_post(self):
+        data = self.read_json_body(max_bytes=2048)
+        if SPEECH_QUEUE is None:
+            return 503, {"ok": False, "state": "unavailable"}
+        result = SPEECH_QUEUE.enqueue(data.get("text"), data.get("request_id"))
+        status = {
+            "queued": 202,
+            "duplicate": 200,
+            "full": 429,
+            "unavailable": 503,
+        }.get(result.get("state"), 503)
+        return status, result
 
     def read_json_body(self, max_bytes):
         try:
@@ -1557,16 +1639,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "automation/navigation/stop":
             return stop_automatic_navigation()
         if path == "stop/all":
-            motion_result = stop_motion_safely()
             waypoint_result = cancel_waypoints_safely()
-            status, body = stop_task("all")
+            behavior_tasks = tuple(task for task in TASK_COMMANDS if task != "base")
+            stopped = stop_task_batch(
+                behavior_tasks,
+                preserve_patterns=(TASK_PATTERNS["base"],),
+            )
+            lidar_motor_result = stop_lidar_motor_safely()
+            # Stop behavior publishers first, then publish zero while the base
+            # driver is still alive so the motor controller receives it.
+            motion_result = stop_motion_safely()
+            status = 200
+            body = {"stopped": stopped, "preserved": ["base"]}
             body["motion"] = motion_result
             body["waypoints"] = waypoint_result
+            body["lidar_motor"] = lidar_motor_result
             return status, body
         if path.startswith("start/"):
             return start_task(unquote(path.split("/", 1)[1]))
         if path.startswith("stop/"):
-            return stop_task(unquote(path.split("/", 1)[1]))
+            task = unquote(path.split("/", 1)[1])
+            status, body = stop_task(task)
+            if task == "lidar" and status == 200:
+                body["lidar_motor"] = stop_lidar_motor_safely()
+            return status, body
         if path == "emergency_stop":
             result = stop_motion_safely()
             cancel_waypoints_safely()
@@ -1620,7 +1716,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global CAMERA_STREAM, MOTION_BRIDGE, NAVIGATION_BRIDGE, BASE_READY_CONTAINER
+    global CAMERA_STREAM, MOTION_BRIDGE, NAVIGATION_BRIDGE, SPEECH_QUEUE, BASE_READY_CONTAINER
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default=DEFAULT_CONTAINER)
     parser.add_argument("--host", default="0.0.0.0")
@@ -1660,6 +1756,7 @@ def main():
         fps=args.camera_fps,
         quality=args.camera_quality,
     )
+    SPEECH_QUEUE = SpeechQueue(speak_text)
 
     if not args.dry_run:
         try:
@@ -1689,19 +1786,23 @@ def main():
         server.serve_forever()
     finally:
         try:
-            if CAMERA_STREAM is not None:
-                CAMERA_STREAM.shutdown()
+            if SPEECH_QUEUE is not None:
+                SPEECH_QUEUE.shutdown()
         finally:
             try:
-                if server is not None:
-                    server.server_close()
+                if CAMERA_STREAM is not None:
+                    CAMERA_STREAM.shutdown()
             finally:
-                if MOTION_BRIDGE is not None:
-                    try:
-                        MOTION_BRIDGE.shutdown()
-                    finally:
-                        if NAVIGATION_BRIDGE is not None:
-                            NAVIGATION_BRIDGE.shutdown()
+                try:
+                    if server is not None:
+                        server.server_close()
+                finally:
+                    if MOTION_BRIDGE is not None:
+                        try:
+                            MOTION_BRIDGE.shutdown()
+                        finally:
+                            if NAVIGATION_BRIDGE is not None:
+                                NAVIGATION_BRIDGE.shutdown()
 
 
 if __name__ == "__main__":

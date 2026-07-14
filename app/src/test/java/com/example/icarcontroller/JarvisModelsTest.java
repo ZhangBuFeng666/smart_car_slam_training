@@ -4,6 +4,7 @@ import org.junit.Test;
 import org.json.JSONObject;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class JarvisModelsTest {
@@ -74,6 +75,21 @@ public class JarvisModelsTest {
     }
 
     @Test
+    public void parsesChatSpeechMetadata() throws Exception {
+        JarvisChatResponse response = JarvisApi.parseChatResponse(new JSONObject("{"
+                + "\"reply\":\"完整回答\","
+                + "\"spoken_reply\":\"口语摘要\","
+                + "\"speech\":{\"state\":\"queued\",\"request_id\":\"speech-1\"},"
+                + "\"plan\":null"
+                + "}"));
+
+        assertEquals("完整回答", response.getReply());
+        assertEquals("口语摘要", response.getSpokenReply());
+        assertEquals("queued", response.getSpeechState());
+        assertEquals("speech-1", response.getSpeechRequestId());
+    }
+
+    @Test
     public void parsesReadyControlTaskAndEnablesStart() throws Exception {
         JarvisControlTask task = JarvisJson.parseControlTask(new JSONObject("{"
                 + "\"id\":\"task-1\","
@@ -100,6 +116,31 @@ public class JarvisModelsTest {
         );
     }
 
+    @Test
+    public void featureTasksStopPollingOnceRunningButMotionTasksKeepPolling() throws Exception {
+        JarvisControlTask feature = controlTask("feature", JarvisControlTaskState.RUNNING);
+        JarvisControlTask motion = controlTask("motion", JarvisControlTaskState.RUNNING);
+
+        assertFalse(JarvisControlTaskPolling.shouldContinue(feature));
+        assertTrue(JarvisControlTaskPolling.shouldContinue(motion));
+    }
+
+    @Test
+    public void directJarvisCommandWaitsForManualStartWhenPreparationIsReady() {
+        assertFalse(JarvisControlTaskPolling.shouldAutoStart(
+                controlTask("feature", JarvisControlTaskState.READY),
+                true
+        ));
+        assertFalse(JarvisControlTaskPolling.shouldAutoStart(
+                controlTask("feature", JarvisControlTaskState.PREPARING),
+                true
+        ));
+        assertFalse(JarvisControlTaskPolling.shouldAutoStart(
+                controlTask("feature", JarvisControlTaskState.READY),
+                false
+        ));
+    }
+
     @Test(expected = JarvisProtocolException.class)
     public void rejectsUnknownMissionState() {
         JarvisJson.parseMission(MISSION_JSON.replace("WAITING_CONFIRMATION", "BROKEN"));
@@ -119,5 +160,21 @@ public class JarvisModelsTest {
                 + "\"timestamp\":\"2026-01-15T10:30:00+08:00\","
                 + "\"metadata\":{}"
                 + "}");
+    }
+
+    private static JarvisControlTask controlTask(String kind, JarvisControlTaskState state) {
+        return new JarvisControlTask(
+                "task-1",
+                "测试任务",
+                kind,
+                state,
+                java.util.Collections.singletonList("step"),
+                1,
+                "running",
+                0.0,
+                0.0,
+                "",
+                null
+        );
     }
 }

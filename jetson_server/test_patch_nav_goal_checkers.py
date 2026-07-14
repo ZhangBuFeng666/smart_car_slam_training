@@ -30,6 +30,32 @@ class PatchNavGoalCheckersTest(unittest.TestCase):
         self.assertEqual(1, patched.count("goal_checker_plugin"))
         self.assertIn("yaw_goal_tolerance: 0.174533", patched)
 
+    def test_limits_controller_and_recovery_rotation(self):
+        source = '''controller_server:
+  ros__parameters:
+    goal_checker_plugin: "goal_checker"
+    controller_plugins: ["FollowPath"]
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      yaw_goal_tolerance: 0.25
+    FollowPath:
+      max_vel_theta: 1.0
+      acc_lim_theta: 3.2
+      rotate_to_heading_angular_vel: 0.45
+recoveries_server:
+  ros__parameters:
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+'''
+        patched = patch_text(source)
+        self.assertIn("max_vel_theta: 0.5", patched)
+        self.assertIn("acc_lim_theta: 0.5", patched)
+        self.assertIn("rotate_to_heading_angular_vel: 0.35", patched)
+        self.assertIn("max_rotational_vel: 0.35", patched)
+        self.assertIn("min_rotational_vel: 0.10", patched)
+        self.assertIn("rotational_acc_lim: 0.5", patched)
+
     def test_file_patch_is_idempotent_and_keeps_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "dwa_nav_params.yaml"

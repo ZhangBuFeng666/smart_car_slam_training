@@ -68,8 +68,11 @@ The waypoint endpoint requires an explicit route start. The server publishes
 that start on `/initialpose`, then executes every ordered point as an individual
 `/navigate_to_pose` goal. After each result, the bridge verifies the live
 `map -> base_footprint` yaw three times against the requested heading with a
-10-degree tolerance. A mismatched heading is corrected by resubmitting the same
-pose once; a second mismatch stops the route instead of advancing. Starting automatic mapping always stops the previous
+10-degree tolerance. A mismatched heading is corrected by a dedicated bounded
+closed-loop turn (0.08-0.25 rad/s) instead of resubmitting the full Nav2 goal.
+The bridge stops immediately if IMU or measured velocity feedback becomes stale,
+waits for localization/action/feedback to remain ready before the first goal,
+and retries a transient Nav2 goal rejection twice. Starting automatic mapping always stops the previous
 Gmapping/RViz processes and resets the cached map snapshot, so a second run is
 a new SLAM session rather than a continuation of the first one.
 
@@ -82,14 +85,17 @@ Robot pose is resolved from `map` to `base_footprint`/`base_link` TF, with
 `/amcl_pose` as an additional source. Android sends its last map generation so
 unchanged map cells are not retransmitted on each poll.
 
-Apply the same explicit 10-degree Nav2 goal checker to DWA, TEB and RPP in an
+Apply the same explicit 10-degree Nav2 goal checker and conservative rotation
+limits to DWA, TEB and RPP in an
 8b98 workspace before restarting navigation:
 
 ```bash
 python3 patch_nav_goal_checkers.py --workspace /root/icar_ros2_ws/icar_ws
 ```
 
-The patch updates both source and install parameter files, is idempotent, and
+The patch limits normal controller turns to at most 0.5 rad/s (RPP heading turns
+to 0.35 rad/s) and recovery spins to 0.10-0.35 rad/s at 0.5 rad/s². It updates
+both source and install parameter files, is idempotent, and
 keeps a one-time `.before-yaw-goal-checker` backup beside every modified file.
 
 The selected container must provide the normal ROS 2 Python packages used by
@@ -102,6 +108,11 @@ source /opt/ros/foxy/setup.bash
 python3 -c "import rclpy, tf2_ros; from nav_msgs.msg import OccupancyGrid, Path; from geometry_msgs.msg import PoseStamped"
 ros2 topic list | grep -E '/map|/amcl_pose|/plan|/global_plan|/goal_pose'
 ```
+
+The X3 driver override also drops repeated idle zero-velocity frames from the
+vendor joy node and avoids synchronous firmware-version polling. Sensor timer
+exceptions are logged without permanently stopping `/imu/data_raw` and
+`/vel_raw` publication.
 
 The navigation bridge also supports waypoint execution, cancellation, and
 state polling through `/navigation/waypoints/*` and `/navigation/state`.

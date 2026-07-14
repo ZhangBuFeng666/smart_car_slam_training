@@ -711,7 +711,7 @@ class MainActivity : Activity() {
             }
             setPadding(dp(20), dp(18), dp(20), dp(18))
             layoutParams = matchWrapParams(bottom = 0).apply {
-                height = dp(600)
+                height = dp(InteractionSpec.obsidianHeroHeightDp())
                 setMargins(dp(12), dp(10), dp(12), dp(12))
             }
         }
@@ -769,27 +769,10 @@ class MainActivity : Activity() {
         }
         stage.addView(vehicleStage, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(InteractionSpec.vehicleStageHeightDp() - 32),
+            dp(InteractionSpec.vehicleStageHeightDp()),
             Gravity.TOP
         ).apply {
             topMargin = dp(112)
-        })
-
-        val metrics = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        listOf(
-            "86" to "电量 %",
-            "00" to "异常",
-            "--" to "预计 min"
-        ).forEachIndexed { index, metric ->
-            metrics.addView(obsidianMetric(metric.first, metric.second), LinearLayout.LayoutParams(0, dp(58), 1f).apply {
-                if (index > 0) setMargins(dp(1), 0, 0, 0)
-            })
-        }
-        stage.addView(metrics, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58), Gravity.TOP).apply {
-            topMargin = dp(392)
         })
 
         val shortcuts = LinearLayout(this).apply {
@@ -805,8 +788,12 @@ class MainActivity : Activity() {
                 if (index > 0) setMargins(dp(7), 0, 0, 0)
             })
         }
-        stage.addView(shortcuts, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40), Gravity.TOP).apply {
-            topMargin = dp(458)
+        stage.addView(shortcuts, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40), Gravity.BOTTOM).apply {
+            bottomMargin = dp(
+                InteractionSpec.obsidianPrimaryHeightDp() +
+                    InteractionSpec.obsidianActionGapDp() +
+                    2
+            )
         })
 
         val primary = TextView(this).apply {
@@ -844,26 +831,6 @@ class MainActivity : Activity() {
         }
         return stage
     }
-
-    private fun obsidianMetric(value: String, label: String): LinearLayout =
-        LinearLayout(this).apply {
-            val palette = parkingPalette()
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            addView(TextView(this@MainActivity).apply {
-                text = value
-                gravity = Gravity.CENTER
-                setTextColor(color(palette.textPrimary))
-                textSize = 20f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = label
-                gravity = Gravity.CENTER
-                setTextColor(color(palette.textSecondary))
-                textSize = 9f
-            })
-        }
 
     private fun obsidianShortcut(label: String, action: () -> Unit): TextView =
         TextView(this).apply {

@@ -8,6 +8,14 @@ from pathlib import Path
 
 
 YAW_TOLERANCE = "0.174533"
+ROTATION_LIMITS = {
+    "max_vel_theta": "0.5",
+    "acc_lim_theta": "0.5",
+    "rotate_to_heading_angular_vel": "0.35",
+    "max_rotational_vel": "0.35",
+    "min_rotational_vel": "0.10",
+    "rotational_acc_lim": "0.5",
+}
 GOAL_CHECKER_BLOCK = '''    progress_checker_plugin: "progress_checker"
     goal_checker_plugin: "goal_checker"
     progress_checker:
@@ -38,6 +46,13 @@ def patch_text(text):
         raise ValueError(
             "expected exactly one yaw_goal_tolerance after patching, found %d"
             % replacements
+        )
+    for name, value in ROTATION_LIMITS.items():
+        text = re.sub(
+            rf"(^\s*{re.escape(name)}:\s*)[^#\s]+",
+            rf"\g<1>{value}",
+            text,
+            flags=re.MULTILINE,
         )
     return text
 

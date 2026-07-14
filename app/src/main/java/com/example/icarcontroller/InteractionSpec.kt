@@ -25,7 +25,7 @@ object InteractionSpec {
     fun obsidianHeroHeightDp(): Int = 638
 
     @JvmStatic
-    fun vehicleStageHeightDp(): Int = 312
+    fun vehicleStageHeightDp(): Int = 404
 
     @JvmStatic
     fun obsidianPrimaryHeightDp(): Int = 58

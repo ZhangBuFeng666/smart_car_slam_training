@@ -6,6 +6,8 @@ import sys
 import math
 import random
 import threading
+import time
+import traceback
 from math import pi
 from time import sleep
 from Rosmaster_Lib import Rosmaster
@@ -35,7 +37,6 @@ class icar_driver(Node):
 		self.car_io_lock = threading.Lock()
 		self.command_callback_group = MutuallyExclusiveCallbackGroup()
 		self.cached_version = 1.0
-		self.version_poll_ticks = 0
 		self.car.set_car_type(1)
 		#get parameter
 		self.declare_parameter('car_type', 'X3')
@@ -94,13 +95,15 @@ class icar_driver(Node):
 		self.imuPublisher = self.create_publisher(Imu,"imu/data_raw",100)
 		self.magPublisher = self.create_publisher(MagneticField,"imu/mag",100)
 
-		#create timer
-		self.timer = self.create_timer(0.1, self.pub_data)
-
 		#create and init variable
 		self.edition = Float32()
 		self.edition.data = 1.0
 		self.car.create_receive_threading()
+		# Sensor publishing is driven explicitly by main() below. The vendor Foxy
+		# build has lost both unreferenced rclpy timers and publishes made from a
+		# background Python thread while leaving the node visible in the ROS graph.
+		# Keeping the fixed-rate publish call on the executor's owner thread avoids
+		# both failure modes.
 	#callback function
 	def cmd_vel_callback(self,msg):
         # 小车运动控制，订阅者回调函数
@@ -112,7 +115,17 @@ class icar_driver(Node):
         #vy = msg.linear.y/1000.0*180.0/3.1416    #Radian system
 		vy = msg.linear.y*1.0
 		angular = msg.angular.z*1.0     # wait for chang
+		previous_motion = self.commanded_motion
 		self.commanded_motion = (vx, vy, angular)
+		# The vendor joy node continuously publishes a zero Twist even when no
+		# joystick is connected. Rewriting that identical stop frame can saturate
+		# the USB serial link and starve the sensor timer. A transition from motion
+		# to zero is still always sent.
+		if (
+			all(abs(value) < 1e-6 for value in self.commanded_motion) and
+			all(abs(value) < 1e-6 for value in previous_motion)
+		):
+			return
 		with self.car_io_lock:
 			self.car.set_car_motion(vx, vy, angular)
 		'''print("cmd_vx: ",vx)
@@ -160,6 +173,14 @@ class icar_driver(Node):
 
 	#pub data
 	def pub_data(self):
+		try:
+			self.publish_sensor_data()
+		except Exception:
+			# rclpy worker exceptions can otherwise leave the timer silently dead
+			# while the node remains visible in the ROS graph.
+			self.get_logger().error("sensor publish failed:\n%s" % traceback.format_exc())
+
+	def publish_sensor_data(self):
 		time_stamp = Clock().now()
 		imu = Imu()
 		twist = Twist()
@@ -177,16 +198,9 @@ class icar_driver(Node):
 							self.Prefix+"front_right_steer_joint", self.Prefix+"front_right_wheel_joint"]
 
 		#print ("mag: ",self.car.get_magnetometer_data())
-		# Firmware version is effectively static. Querying it every 100 ms performs
-		# synchronous serial I/O and can starve /cmd_vel while Nav2 is busy.
-		if self.version_poll_ticks <= 0:
-			with self.car_io_lock:
-				version = self.car.get_version()*1.0
-			if version >= 0:
-				self.cached_version = version
-			self.version_poll_ticks = 100
-		else:
-			self.version_poll_ticks -= 1
+		# The firmware version is static for the lifetime of this controller.
+		# Rosmaster.get_version() performs a synchronous request on the same serial
+		# port as motion commands and previously contributed to executor stalls.
 		edition.data = self.cached_version
 		battery.data = self.car.get_battery_voltage()*1.0
 		ax, ay, az = self.car.get_accelerometer_data()
@@ -233,6 +247,14 @@ class icar_driver(Node):
 		self.volPublisher.publish(battery)
 		self.EdiPublisher.publish(edition)
 
+	def shutdown_driver(self):
+		try:
+			with self.car_io_lock:
+				self.car.set_car_motion(0.0, 0.0, 0.0)
+				self.car.ser.close()
+		except Exception:
+			pass
+
 
 
 def main():
@@ -241,8 +263,16 @@ def main():
 	executor = MultiThreadedExecutor(num_threads=2)
 	executor.add_node(driver)
 	try:
-		executor.spin()
+		next_sensor_publish = time.monotonic()
+		while rclpy.ok():
+			now = time.monotonic()
+			executor.spin_once(timeout_sec=max(0.0, min(0.05, next_sensor_publish - now)))
+			now = time.monotonic()
+			if now >= next_sensor_publish:
+				driver.pub_data()
+				next_sensor_publish = max(next_sensor_publish + 0.1, now)
 	finally:
+		driver.shutdown_driver()
 		executor.shutdown()
 		driver.destroy_node()
 		rclpy.shutdown()

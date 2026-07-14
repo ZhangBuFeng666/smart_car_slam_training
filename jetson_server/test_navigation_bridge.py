@@ -6,6 +6,8 @@ from jetson_server.navigation_bridge import (
     NavigationSnapshotStore,
     YawStabilityTracker,
     downsample_points,
+    feedback_is_fresh,
+    heading_angular_velocity,
     normalize_angle,
     quaternion_to_yaw,
     rle_encode,
@@ -37,6 +39,19 @@ class NavigationBridgeTest(unittest.TestCase):
         self.assertFalse(tracker.observe(math.radians(8)))
         self.assertFalse(tracker.observe(math.radians(7)))
         self.assertTrue(tracker.observe(math.radians(6)))
+
+    def test_heading_controller_stops_inside_tolerance(self):
+        self.assertEqual(0.0, heading_angular_velocity(math.radians(9.0)))
+
+    def test_heading_controller_uses_shortest_bounded_turn(self):
+        self.assertAlmostEqual(0.25, heading_angular_velocity(math.radians(90)))
+        self.assertAlmostEqual(-0.25, heading_angular_velocity(math.radians(-90)))
+        self.assertLess(heading_angular_velocity(math.radians(10.1)), 0.10)
+
+    def test_robot_feedback_requires_fresh_imu_and_velocity(self):
+        self.assertTrue(feedback_is_fresh(9.4, 9.2, 10.0, timeout=1.0))
+        self.assertFalse(feedback_is_fresh(None, 9.9, 10.0, timeout=1.0))
+        self.assertFalse(feedback_is_fresh(8.9, 9.9, 10.0, timeout=1.0))
 
     def test_rle_encode_compacts_occupancy_values(self):
         self.assertEqual([0, 3, 100, 2, -1, 1], rle_encode([0, 0, 0, 100, 100, -1]))

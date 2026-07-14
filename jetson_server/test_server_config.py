@@ -121,6 +121,7 @@ class ServerConfigTest(unittest.TestCase):
         self.assertEqual("8b98", bridge.container)
         self.assertEqual("motion_bridge.py", bridge.script_path.name)
         self.assertTrue(bridge.script_path.is_file())
+        self.assertEqual(1500, bridge.watchdog_ms)
 
     def test_navigation_bridge_factory_uses_repo_navigation_script(self):
         bridge = server.create_navigation_bridge("ed97")

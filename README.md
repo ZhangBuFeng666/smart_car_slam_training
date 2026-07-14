@@ -82,7 +82,7 @@ python3 server.py --container 8b98 --host 0.0.0.0 --port 8000
 
 APP 的“导航”页已按第 3 章手册接入一键自动工作流：
 
-1. 一键自动建图：服务自动停止独立底盘驱动和上一轮 Gmapping/RViz，清空 APP 地图缓存，再按 `m1 → m2` 启动全新的 Gmapping 会话；因此第二次建图不会接着修改第一次的栅格地图。`m1` 已内置底盘驱动，不会重复占用串口。建图节点会在页面切换后继续运行，可通过底部“驾驶”页按住方向键低速扫描环境。
+1. 一键自动建图：服务自动停止独立底盘驱动和上一轮 Gmapping/RViz，清空 APP 地图缓存，再按 `m1 → m2` 启动全新的 Gmapping 会话；因此第二次建图不会接着修改第一次的栅格地图。`m1` 已内置底盘驱动，不会重复占用串口。导航页地图下方提供与驾驶页一致的按住移动、松手停止控制，可在观察实时建图画面的同时低速扫描环境；底部“驾驶”页仍可正常使用。
 2. 保存地图并结束建图：调用 `m4` 保存 `icar.pgm` 和 `icar.yaml`，成功后关闭建图节点。导航启动时会把同一份 `icar.yaml` 显式传给 Nav2，避免厂商 launch 文件默认的 `yahboomcar.yaml` 与保存文件名不一致。
 3. 一键自动导航：服务自动停止独立底盘驱动，再按 `n1 → n2 → n3`（DWA）、`n1 → n2 → n4`（TEB）或 `n1 → n2 → n5`（A* + RPP）启动完整导航链路；`n1` 已内置底盘驱动。驾驶页首次按方向键时会自动恢复独立底盘驱动，不需要运行 Jetson 命令。
 4. 路径规划：APP 发布初始位姿和目标点，Nav2 的 `planner_server` 生成路径，`controller_server` 控制小车跟随路径。
@@ -128,7 +128,10 @@ The HTTP service keeps one ROS 2 publisher
 alive inside the selected container, so Android movement requests no longer
 start a new Docker and ROS process for every touch event. Manual velocity is
 held continuously until Android sends an explicit stop on release, page exit,
-the stop button, or emergency stop.
+the stop button, or emergency stop. Android refreshes a held direction every
+120 ms; if the hotspot drops those refreshes for 1.5 seconds, the bridge
+automatically publishes zero velocity so a lost release request cannot leave
+the car moving indefinitely.
 
 ## Jarvis patrol agent
 

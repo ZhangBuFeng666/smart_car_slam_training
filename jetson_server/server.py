@@ -43,6 +43,7 @@ ROS_SETUP = (
 )
 
 DEFAULT_CONTAINER = "8b98"
+MOTION_WATCHDOG_MS = 1500
 NAVIGATION_PACKAGES = ("icar_nav", "yahboomcar_nav")
 ICAR_MAP_PATH = "/root/icar_ros2_ws/icar_ws/src/icar_nav/maps/icar.yaml"
 NAVIGATION_LAUNCH_FILES = {
@@ -170,6 +171,7 @@ SERVER_CONFIG = {
     "navigation_tasks_ready": True,
     "missing_navigation_launches": {},
     "n5_command_override": None,
+    "motion_watchdog_ms": MOTION_WATCHDOG_MS,
 }
 MOTION_BRIDGE = None
 NAVIGATION_BRIDGE = None
@@ -506,6 +508,7 @@ def create_motion_bridge(container):
     return MotionBridgeClient(
         container=container,
         script_path=Path(__file__).with_name("motion_bridge.py"),
+        watchdog_ms=MOTION_WATCHDOG_MS,
     )
 
 
@@ -1512,6 +1515,7 @@ class Handler(BaseHTTPRequestHandler):
                 "container": SERVER_CONFIG["container"],
                 "container_running": container_is_running(),
                 "motion_bridge_ready": bool(MOTION_BRIDGE and MOTION_BRIDGE.is_running()),
+                "motion_watchdog_ms": SERVER_CONFIG["motion_watchdog_ms"],
                 "navigation_bridge_ready": bool(NAVIGATION_BRIDGE and NAVIGATION_BRIDGE.is_running()),
                 **navigation_profile_status(),
             }

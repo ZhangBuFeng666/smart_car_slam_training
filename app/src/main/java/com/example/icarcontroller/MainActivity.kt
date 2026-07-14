@@ -88,6 +88,8 @@ class MainActivity : Activity() {
     private var parkingMapView: ParkingMapView? = null
     private var parkingMapCaption: TextView? = null
     private var parkingWaypointStatusText: TextView? = null
+    private var navigationManualSpeedText: TextView? = null
+    private var navigationManualStateText: TextView? = null
     private var driveCameraPanel: DriveCameraPanel? = null
     private var fullscreenDriveOverlay: FullscreenDriveOverlay? = null
     private var fullscreenDrivePending = false
@@ -241,6 +243,8 @@ class MainActivity : Activity() {
         parkingVisionView = null
         parkingMapView = null
         parkingMapCaption = null
+        navigationManualSpeedText = null
+        navigationManualStateText = null
         homeConnectionText = null
         pageStatusText = null
         hostInput = null
@@ -1615,7 +1619,7 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply {
                 text = checkpoint.code
                 setTextColor(color("#C6B57B"))
-                textSize = 12f
+                textSize = 11f
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             })
             addView(TextView(this@MainActivity).apply {
@@ -1627,7 +1631,7 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply {
                 text = checkpoint.subtitle
                 setTextColor(color("#89938E"))
-                textSize = 11f
+                textSize = 12f
             }, matchWrapParams(top = 3))
             addView(Space(this@MainActivity), LinearLayout.LayoutParams(1, 0, 1f))
             addView(parkingChip(checkpoint.status))
@@ -1772,6 +1776,7 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(InteractionSpec.parkingMapStageHeightDp())
         ))
+        addView(parkingNavigationManualControl(), matchWrapParams(top = 8))
         addView(TextView(this@MainActivity).apply {
             text = "本地路线草图 · 接入 ROS 地图后替换为实时位姿"
             setTextColor(color(palette.textSecondary))
@@ -1862,6 +1867,92 @@ class MainActivity : Activity() {
         if (selectedPage == "nav" && !isFinishing) {
             mainHandler.post(navigationPollRunnable)
         }
+    }
+
+    private fun parkingNavigationManualControl(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(palette.surface, palette.border, 18, palette.surfaceAlt)
+        elevation = dp(InteractionSpec.parkingDriveButtonElevationDp()).toFloat()
+        setPadding(dp(9), dp(9), dp(9), dp(9))
+
+        val heading = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "建图手动控制"
+                setTextColor(color(palette.textPrimary))
+                textSize = 15f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            navigationManualStateText = TextView(this@MainActivity).apply {
+                text = "待命"
+                gravity = Gravity.END
+                setTextColor(color(palette.accentText))
+                textSize = 12f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            addView(navigationManualStateText)
+        }
+        addView(heading)
+
+        addView(TextView(this@MainActivity).apply {
+            text = "按住移动，松手停止 · 自动导航执行时请勿使用"
+            setTextColor(color(palette.textSecondary))
+            textSize = 11f
+        }, matchWrapParams(top = 2))
+
+        val presetButtons = mutableListOf<Pair<Button, Int>>()
+        lateinit var refreshPresets: () -> Unit
+        val presets = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            listOf("慢速" to 5, "标准" to 13, "快速" to 23).forEachIndexed { index, item ->
+                val button = Button(this@MainActivity).apply {
+                    text = item.first
+                    isAllCaps = false
+                    includeFontPadding = false
+                    minHeight = 0
+                    minimumHeight = 0
+                    textSize = 12f
+                    stateListAnimator = null
+                    setOnClickListener {
+                        speedProgress = item.second
+                        updateSpeedText()
+                        refreshPresets()
+                    }
+                }
+                presetButtons += button to item.second
+                addView(button, LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                    if (index > 0) setMargins(dp(6), 0, 0, 0)
+                })
+            }
+        }
+        refreshPresets = {
+            presetButtons.forEach { (button, progress) ->
+                val selected = speedProgress == progress
+                button.setTextColor(color(if (selected) palette.accentText else palette.textSecondary))
+                button.background = if (selected) {
+                    tactileBackground(palette.accentSoft, palette.surface, palette.accent, 12)
+                } else {
+                    tactileBackground(palette.surface, palette.surfaceAlt, palette.border, 12)
+                }
+            }
+            navigationManualSpeedText?.text = String.format(
+                Locale.US,
+                "速度 %.2f m/s · 转向 %.2f rad/s",
+                currentSpeed(),
+                currentTurn()
+            )
+        }
+        addView(presets, matchWrapParams(top = 7))
+        navigationManualSpeedText = TextView(this@MainActivity).apply {
+            setTextColor(color(palette.textSecondary))
+            textSize = 12f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        addView(navigationManualSpeedText, matchWrapParams(top = 4))
+        refreshPresets()
+        addView(parkingMovementGrid(), matchWrapParams(top = 6))
     }
 
     private fun stopNavigationPolling() {
@@ -3539,6 +3630,12 @@ class MainActivity : Activity() {
 
     private fun updateSpeedText() {
         txtSpeed?.text = String.format(Locale.US, "速度 %.2f m/s，转向 %.2f rad/s", currentSpeed(), currentTurn())
+        navigationManualSpeedText?.text = String.format(
+            Locale.US,
+            "速度 %.2f m/s · 转向 %.2f rad/s",
+            currentSpeed(),
+            currentTurn()
+        )
         if (driveSpeedSeekBar?.progress != speedProgress) {
             driveSpeedSeekBar?.progress = speedProgress
         }
@@ -3547,6 +3644,7 @@ class MainActivity : Activity() {
 
     private fun updateDriveState() {
         fullscreenDriveOverlay?.updateMotion(currentMotionLabel)
+        navigationManualStateText?.text = currentMotionLabel
         txtDriveState?.animate()
             ?.alpha(0.55f)
             ?.scaleX(0.98f)

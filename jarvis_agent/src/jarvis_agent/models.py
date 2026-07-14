@@ -69,6 +69,7 @@ class MissionPlan(ExternalModel):
 class ChatRequest(ExternalModel):
     message: str
     context: Dict[str, Any] = Field(default_factory=dict)
+    speech_enabled: bool = False
 
     @field_validator("message")
     @classmethod
@@ -76,6 +77,11 @@ class ChatRequest(ExternalModel):
         if not value.strip():
             raise ValueError("message must not be blank")
         return value
+
+
+class AssistantReply(ExternalModel):
+    reply: str
+    spoken_reply: str
 
 
 class ControlTaskView(ExternalModel):
@@ -94,8 +100,15 @@ class ControlTaskView(ExternalModel):
 
 class ChatResponse(ExternalModel):
     reply: str
+    spoken_reply: Optional[str] = None
+    speech: Optional["SpeechStatus"] = None
     plan: Optional[MissionPlan] = None
     control_task: Optional[ControlTaskView] = None
+
+
+class SpeechStatus(ExternalModel):
+    state: str
+    request_id: Optional[str] = None
 
 
 class MissionCreateRequest(ExternalModel):

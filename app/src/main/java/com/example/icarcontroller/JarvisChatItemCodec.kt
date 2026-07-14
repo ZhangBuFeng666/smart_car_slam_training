@@ -14,7 +14,9 @@ object JarvisChatItemCodec {
                 payload.put("text", item.text).put("timestamp", item.timestamp)
             }
             is JarvisChatItem.AssistantMessage -> "assistant".also {
-                payload.put("text", item.text).put("timestamp", item.timestamp)
+                payload.put("text", item.text)
+                    .put("spoken_text", item.spokenText ?: JSONObject.NULL)
+                    .put("timestamp", item.timestamp)
             }
             is JarvisChatItem.SystemEvent -> "system".also {
                 payload.put("text", item.text).put("timestamp", item.timestamp)
@@ -46,7 +48,13 @@ object JarvisChatItemCodec {
         val timestamp = payload.optString("timestamp")
         when (encoded.type) {
             "user" -> JarvisChatItem.UserMessage(payload.getString("text"), timestamp)
-            "assistant" -> JarvisChatItem.AssistantMessage(payload.getString("text"), timestamp)
+            "assistant" -> JarvisChatItem.AssistantMessage(
+                payload.getString("text"),
+                timestamp,
+                if (payload.has("spoken_text") && !payload.isNull("spoken_text")) {
+                    payload.getString("spoken_text")
+                } else null
+            )
             "system" -> JarvisChatItem.SystemEvent(payload.getString("text"), timestamp)
             "error" -> JarvisChatItem.ErrorMessage(
                 payload.getString("title"), payload.getString("detail"), timestamp

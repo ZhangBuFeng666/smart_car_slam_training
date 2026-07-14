@@ -859,6 +859,35 @@ class MotionRouteTest(unittest.TestCase):
             pitch="+2Hz",
         )
 
+    def test_speech_enqueue_route_returns_before_playback(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/speech/enqueue"
+        payload = json.dumps({
+            "text": "前方通道畅通。",
+            "source": "jarvis",
+            "request_id": "speech-1",
+        }).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = FakeRequestBody(payload)
+        captured = {}
+        handler.reply = lambda status, body: captured.update({"status": status, "body": body})
+
+        class FakeSpeechQueue:
+            def __init__(self):
+                self.calls = []
+
+            def enqueue(self, text, request_id):
+                self.calls.append((text, request_id))
+                return {"ok": True, "state": "queued", "request_id": request_id}
+
+        speech_queue = FakeSpeechQueue()
+        with patch.object(server, "SPEECH_QUEUE", speech_queue, create=True):
+            handler.do_POST()
+
+        self.assertEqual(202, captured["status"])
+        self.assertEqual("queued", captured["body"]["state"])
+        self.assertEqual([("前方通道畅通。", "speech-1")], speech_queue.calls)
+
     def test_speak_text_prefers_edge_tts_with_selected_voice(self):
         server.SERVER_CONFIG["dry_run"] = False
         run_calls = []
@@ -884,9 +913,13 @@ class MotionRouteTest(unittest.TestCase):
         self.assertIn("zh-CN-YunyangNeural", edge_calls[0])
         self.assertIn("+8%", edge_calls[0])
         self.assertIn("+2Hz", edge_calls[0])
-        ffplay_calls = [command for command in run_calls if command and command[0] == "ffplay"]
-        self.assertEqual(1, len(ffplay_calls))
-        self.assertTrue(ffplay_calls[0][-1].endswith(".mp3"))
+        ffmpeg_calls = [command for command in run_calls if command and command[0] == "ffmpeg"]
+        self.assertEqual(1, len(ffmpeg_calls))
+        self.assertTrue(ffmpeg_calls[0][-1].endswith(".wav"))
+        aplay_calls = [command for command in run_calls if command and command[0] == "aplay"]
+        self.assertEqual(1, len(aplay_calls))
+        self.assertIn(server.USB_ALSA_DEVICE, aplay_calls[0])
+        self.assertTrue(aplay_calls[0][-1].endswith(".wav"))
 
     def test_speak_text_falls_back_to_generated_wav_file_when_edge_tts_is_unavailable(self):
         server.SERVER_CONFIG["dry_run"] = False
@@ -897,7 +930,7 @@ class MotionRouteTest(unittest.TestCase):
             return FakeCompletedProcess(returncode=0)
 
         def fake_command_exists(command):
-            return command in {"espeak-ng", "paplay"}
+            return command in {"espeak-ng", "aplay"}
 
         with patch.object(server, "command_exists", side_effect=fake_command_exists), patch.object(
             server.subprocess, "run", side_effect=fake_run
@@ -906,10 +939,10 @@ class MotionRouteTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual("espeak-ng", result["engine"])
-        paplay_calls = [command for command in run_calls if command and command[0] == "paplay"]
-        self.assertEqual(1, len(paplay_calls))
-        self.assertNotEqual("-", paplay_calls[0][-1])
-        self.assertTrue(paplay_calls[0][-1].endswith(".wav"))
+        aplay_calls = [command for command in run_calls if command and command[0] == "aplay"]
+        self.assertEqual(1, len(aplay_calls))
+        self.assertIn(server.USB_ALSA_DEVICE, aplay_calls[0])
+        self.assertTrue(aplay_calls[0][-1].endswith(".wav"))
 
     def test_emergency_stop_uses_persistent_bridge(self):
         bridge = FakeMotionBridge()
@@ -940,14 +973,57 @@ class MotionRouteTest(unittest.TestCase):
         )
         stop_task_mock.assert_called_once_with("all")
 
-    def test_stop_all_publishes_zero_velocity_before_stopping_tasks(self):
-        bridge = FakeMotionBridge()
-        server.MOTION_BRIDGE = bridge
+    def test_stop_all_publishes_zero_velocity_after_stopping_tasks(self):
+        events = []
 
-        status, _body = self.handler.route("stop/all", {})
+        class RecordingBridge(FakeMotionBridge):
+            def send(self, direction, speed, turn):
+                events.append("zero_velocity")
+                return super().send(direction, speed, turn)
+
+        server.MOTION_BRIDGE = RecordingBridge()
+
+        def record_stop_batch(tasks, preserve_patterns=()):
+            self.assertNotIn("base", tasks)
+            self.assertEqual((server.TASK_PATTERNS["base"],), preserve_patterns)
+            events.append("stop_behaviors")
+            return [{"task": task, "status": "stopped"} for task in tasks]
+
+        lidar_stop = {"ok": True, "device": "/dev/rplidar"}
+        with patch.object(server, "stop_task_batch", side_effect=record_stop_batch), patch.object(
+            server, "stop_lidar_motor_safely", return_value=lidar_stop
+        ):
+            status, _body = self.handler.route("stop/all", {})
 
         self.assertEqual(200, status)
-        self.assertEqual([("stop", 0.0, 0.0)], bridge.calls)
+        self.assertEqual(["stop_behaviors", "zero_velocity"], events)
+        self.assertEqual(["base"], _body["preserved"])
+        self.assertEqual(lidar_stop, _body["lidar_motor"])
+
+    def test_stop_lidar_also_stops_physical_lidar_motor(self):
+        lidar_stop = {"ok": True, "device": "/dev/rplidar"}
+
+        with patch.object(server, "stop_task", return_value=(200, {"task": "lidar"})), patch.object(
+            server, "stop_lidar_motor_safely", return_value=lidar_stop
+        ) as stop_motor_mock:
+            status, body = self.handler.route("stop/lidar", {})
+
+        self.assertEqual(200, status)
+        self.assertEqual(lidar_stop, body["lidar_motor"])
+        stop_motor_mock.assert_called_once_with()
+
+    def test_batch_stop_can_protect_base_driver_from_cleanup_patterns(self):
+        completed = {"returncode": 0, "stdout": "", "stderr": ""}
+        server.SERVER_CONFIG["dry_run"] = False
+
+        with patch.object(server, "run_once", return_value=completed) as run_once_mock:
+            server.stop_task_batch(
+                ("nav_laser",),
+                preserve_patterns=(server.TASK_PATTERNS["base"],),
+            )
+
+        stop_script = run_once_mock.call_args.args[0]
+        self.assertNotIn("Mcnamu_driver_X3", stop_script)
 
 
 class FakeProcessOutput:

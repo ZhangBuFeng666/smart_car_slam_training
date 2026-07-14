@@ -91,6 +91,23 @@ public class JarvisStateTest {
     }
 
     @Test
+    public void chatReplyStoresSpokenTextForReplay() {
+        JarvisViewState state = JarvisReducer.reduce(
+                JarvisViewState.Companion.initial(),
+                new JarvisEvent.UserMessageSubmitted("介绍一下当前画面")
+        );
+
+        JarvisViewState next = JarvisReducer.reduce(
+                state,
+                new JarvisEvent.ChatReply("屏幕显示完整回答。", "适合播报的回答。")
+        );
+
+        JarvisChatItem.AssistantMessage message =
+                (JarvisChatItem.AssistantMessage) next.getChatItems().get(1);
+        assertEquals("适合播报的回答。", message.getSpokenText());
+    }
+
+    @Test
     public void missionRunningStoresMissionAndTimeline() {
         JarvisMission mission = TestFixtures.mission(JarvisMissionState.RUNNING);
         JarvisTimelineEntry entry = TestFixtures.timeline();
@@ -146,6 +163,54 @@ public class JarvisStateTest {
         assertTrue(state.getChatItems().get(state.getChatItems().size() - 1) instanceof JarvisChatItem.ErrorMessage);
     }
 
+    @Test
+    public void locallyStoppedControlTaskIgnoresStaleRunningPollResult() {
+        JarvisControlTask running = TestFixtures.controlTask(JarvisControlTaskState.RUNNING);
+        JarvisViewState withTask = JarvisReducer.reduce(
+                JarvisViewState.Companion.initial(),
+                new JarvisEvent.ControlTaskReady(running)
+        );
+
+        JarvisViewState stopped = JarvisReducer.reduce(
+                withTask,
+                new JarvisEvent.ControlTaskLocallyStopped("task-001")
+        );
+        JarvisViewState afterStalePoll = JarvisReducer.reduce(
+                stopped,
+                new JarvisEvent.ControlTaskUpdated(running)
+        );
+
+        JarvisChatItem.ControlTaskCard card =
+                (JarvisChatItem.ControlTaskCard) afterStalePoll.getChatItems().get(0);
+        assertEquals(JarvisControlTaskState.STOPPED, card.getTask().getState());
+    }
+
+    @Test
+    public void explicitRestartAllowsFreshPreparingProgressAfterLocalStop() {
+        JarvisControlTask running = TestFixtures.controlTask(JarvisControlTaskState.RUNNING);
+        JarvisControlTask preparing = TestFixtures.controlTask(JarvisControlTaskState.PREPARING);
+        JarvisViewState state = JarvisReducer.reduce(
+                JarvisReducer.reduce(
+                        JarvisReducer.reduce(
+                                JarvisViewState.Companion.initial(),
+                                new JarvisEvent.ControlTaskReady(running)
+                        ),
+                        new JarvisEvent.ControlTaskLocallyStopped("task-001")
+                ),
+                new JarvisEvent.ControlTaskRestartRequested("task-001")
+        );
+
+        JarvisViewState restarted = JarvisReducer.reduce(
+                state,
+                new JarvisEvent.ControlTaskUpdated(preparing)
+        );
+
+        JarvisChatItem.ControlTaskCard card =
+                (JarvisChatItem.ControlTaskCard) restarted.getChatItems().get(0);
+        assertEquals(JarvisControlTaskState.PREPARING, card.getTask().getState());
+        assertFalse(restarted.getLocallyStoppedControlTaskIds().contains("task-001"));
+    }
+
     private static class TestFixtures {
         static JarvisMissionPlan plan() {
             return new JarvisMissionPlan(
@@ -180,6 +245,22 @@ public class JarvisStateTest {
                     "control",
                     "Started task: camera",
                     java.util.Collections.emptyMap()
+            );
+        }
+
+        static JarvisControlTask controlTask(JarvisControlTaskState state) {
+            return new JarvisControlTask(
+                    "task-001",
+                    "自动跟随",
+                    "feature",
+                    state,
+                    java.util.Collections.singletonList("启动自动跟随"),
+                    1,
+                    "自动跟随运行中",
+                    1.0,
+                    1.0,
+                    "",
+                    null
             );
         }
     }

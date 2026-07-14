@@ -102,6 +102,7 @@ public class CarApiTest {
         CarApi api = new CarApi("10.161.57.230", 8000);
 
         assertEquals("http://10.161.57.230:8000/speak", api.speakUrl());
+        assertEquals("http://10.161.57.230:8000/speech/enqueue", api.speechEnqueueUrl());
         assertEquals("http://10.161.57.230:8000/notify/patrol_start", api.notifyUrl("patrol_start"));
     }
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=iCar YOLOv5 Edge Vision Service
+After=network-online.target icar-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/icar_vision
+ExecStart=/usr/bin/python3 /home/jetson/icar_vision/vision_service.py --weights /home/jetson/icar_vision/models/best.onnx --arrow-weights /home/jetson/icar_vision/models/arrow_cls_best.onnx --arrow-img-size 128 --arrow-confidence 0.5 --source http://127.0.0.1:8000/camera/stream --yolo-root /home/jetson/yolov5-7.0 --img-size 416 --max-fps 3 --opencv-threads 2 --port 8200
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

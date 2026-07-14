@@ -176,6 +176,7 @@ SERVER_CONFIG = {
 MOTION_BRIDGE = None
 NAVIGATION_BRIDGE = None
 CAMERA_STREAM = None
+BASE_READY_CONTAINER = None
 AUTOMATION_LOCK = threading.Lock()
 BASE_START_LOCK = threading.Lock()
 STREAM_WRITE_TIMEOUT = 2.0
@@ -989,7 +990,10 @@ def start_task(task):
 
 
 def stop_task_batch(tasks):
+    global BASE_READY_CONTAINER
     ordered = list(dict.fromkeys(reversed(tuple(tasks))))
+    if "base" in ordered:
+        BASE_READY_CONTAINER = None
     if SERVER_CONFIG["dry_run"]:
         results = []
         for task in ordered:
@@ -1082,9 +1086,14 @@ def reset_navigation_map_safely():
 
 def ensure_base_for_manual_motion():
     """Start the standalone base driver on the first manual movement request."""
+    global BASE_READY_CONTAINER
     with BASE_START_LOCK:
+        container = SERVER_CONFIG["container"]
+        if BASE_READY_CONTAINER == container:
+            return {"task": "base", "status": "ready_cached"}
         existing = task_processes("base")
         if existing:
+            BASE_READY_CONTAINER = container
             return {"task": "base", "status": "already_running", "process": existing}
         status, result = start_task("base")
         if status >= 400 or result.get("status") == "start_failed":
@@ -1092,6 +1101,7 @@ def ensure_base_for_manual_motion():
         # Give ROS discovery a short window before the first velocity publish.
         if not SERVER_CONFIG["dry_run"]:
             time.sleep(0.7)
+        BASE_READY_CONTAINER = container
         return result
 
 
@@ -1235,7 +1245,7 @@ def valid_container_id(container):
 
 
 def select_container(container):
-    global MOTION_BRIDGE, NAVIGATION_BRIDGE
+    global MOTION_BRIDGE, NAVIGATION_BRIDGE, BASE_READY_CONTAINER
     selected = container.strip()
     if not valid_container_id(selected):
         return 400, {"error": "container id contains unsupported characters"}
@@ -1280,6 +1290,7 @@ def select_container(container):
         if old_navigation_bridge is not None:
             old_navigation_bridge.shutdown()
         SERVER_CONFIG["container"] = selected
+        BASE_READY_CONTAINER = None
         apply_navigation_profile(profile, SERVER_CONFIG.get("n5_command_override"))
         MOTION_BRIDGE = replacement_motion
         NAVIGATION_BRIDGE = replacement_navigation
@@ -1609,7 +1620,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global CAMERA_STREAM, MOTION_BRIDGE, NAVIGATION_BRIDGE
+    global CAMERA_STREAM, MOTION_BRIDGE, NAVIGATION_BRIDGE, BASE_READY_CONTAINER
     parser = argparse.ArgumentParser(description="HTTP bridge for smart car ROS2 commands")
     parser.add_argument("--container", default=DEFAULT_CONTAINER)
     parser.add_argument("--host", default="0.0.0.0")
@@ -1628,6 +1639,7 @@ def main():
     args = parser.parse_args()
     SERVER_CONFIG["container"] = args.container
     SERVER_CONFIG["dry_run"] = args.dry_run
+    BASE_READY_CONTAINER = None
     if not args.dry_run and not configured_container_is_running(args.container):
         parser.error(f"Docker container {args.container!r} is not running")
     profile = detect_navigation_profile(args.container)
@@ -1659,6 +1671,11 @@ def main():
             )
         except Exception as error:
             print(f"Motion bridge warm-up failed: {error}")
+        try:
+            base = ensure_base_for_manual_motion()
+            print(f"Manual base ready: {base.get('status')}")
+        except Exception as error:
+            print(f"Manual base warm-up failed: {error}")
         try:
             NAVIGATION_BRIDGE.snapshot(-1)
             print("Navigation bridge ready")

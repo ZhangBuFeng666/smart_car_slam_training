@@ -44,6 +44,9 @@ class DetectionContractTest(unittest.TestCase):
             direction="turn_left",
             direction_confidence=0.934,
             stable_direction="turn_left",
+            track_id=3,
+            confirmed=True,
+            hits=4,
         )
 
         payload = detection.to_dict()
@@ -51,6 +54,9 @@ class DetectionContractTest(unittest.TestCase):
         self.assertEqual("turn_left", payload["direction"])
         self.assertEqual(0.934, payload["direction_confidence"])
         self.assertEqual("turn_left", payload["stable_direction"])
+        self.assertEqual(3, payload["track_id"])
+        self.assertTrue(payload["confirmed"])
+        self.assertEqual(4, payload["hits"])
 
     def test_summary_groups_parking_scene_classes(self):
         detections = [

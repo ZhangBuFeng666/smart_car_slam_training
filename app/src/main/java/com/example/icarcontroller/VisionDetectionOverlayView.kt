@@ -44,9 +44,10 @@ class VisionDetectionOverlayView(context: Context) : View(context) {
             val label = "${VisionUiSpec.detectionLabel(detection)} ${VisionUiSpec.detectionConfidence(detection)}"
             val labelWidth = labelPaint.measureText(label) + dp(14f)
             val labelTop = (rect.top - dp(28f)).coerceAtLeast(0f)
+            val labelRight = (rect.left + labelWidth).coerceAtMost(width.toFloat())
             labelBackgroundPaint.color = Color.argb(220, Color.red(color), Color.green(color), Color.blue(color))
             canvas.drawRoundRect(
-                RectF(rect.left, labelTop, rect.left + labelWidth, labelTop + dp(26f)),
+                RectF(rect.left, labelTop, labelRight, labelTop + dp(26f)),
                 dp(5f),
                 dp(5f),
                 labelBackgroundPaint

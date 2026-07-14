@@ -29,8 +29,39 @@ class ServerConfigTest(unittest.TestCase):
         for task in ("nav_dwa", "nav_teb", "nav_astar_rpp"):
             self.assertIn(f"map:={server.ICAR_MAP_PATH}", server.TASK_COMMANDS[task])
 
-    def test_default_container_is_8b98(self):
-        self.assertEqual("8b98", server.DEFAULT_CONTAINER)
+    def test_arrow_turn_task_uses_demo_script_and_http_motion(self):
+        command = server.TASK_COMMANDS["arrow_turn"]
+        self.assertIn("arrow_turn_demo.py", command)
+        self.assertIn("--motion-url http://127.0.0.1:8000", command)
+        self.assertIn("--status-file /tmp/arrow_turn_status.json", command)
+        self.assertEqual("arrow_turn_demo.py", server.TASK_PATTERNS["arrow_turn"])
+
+    def test_arrow_turn_status_merges_process_and_status_file(self):
+        server.SERVER_CONFIG["dry_run"] = False
+        with patch.object(server, "task_processes", return_value="123 python3 arrow_turn_demo.py"), \
+                patch.object(server, "container_is_running", return_value=True), \
+                patch.object(
+                    server,
+                    "run_once",
+                    return_value={
+                        "stdout": json.dumps({
+                            "phase": "seek",
+                            "note": "seeking_creep",
+                            "direction": "turn_left",
+                            "distance_m": 0.91,
+                            "track_id": 4,
+                            "updated_at": 1.0,
+                        }),
+                    },
+                ):
+            body = server.read_arrow_turn_status()
+
+        self.assertTrue(body["running"])
+        self.assertEqual("seek", body["phase"])
+        self.assertEqual("turn_left", body["direction"])
+        self.assertEqual(0.91, body["distance_m"])
+        self.assertEqual(4, body["track_id"])
+
 
     def test_systemd_unit_uses_8b98_and_single_server_path(self):
         unit = Path(__file__).with_name("icar-control.service").read_text()

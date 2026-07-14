@@ -46,6 +46,12 @@ public class FeatureCatalogTest {
         assertTrue(FeatureCatalog.trainingTasks().stream().anyMatch(task -> task.getKey().equals("follow")));
         assertTrue(FeatureCatalog.trainingTasks().stream().anyMatch(task -> task.getKey().equals("warning")));
         assertTrue(FeatureCatalog.trainingTasks().stream().anyMatch(task -> task.getKey().equals("color_track")));
+        assertTrue(FeatureCatalog.trainingTasks().stream().anyMatch(task -> task.getKey().equals("arrow_turn")));
+    }
+
+    @Test
+    public void visionCatalogIncludesArrowTurnDemo() {
+        assertTrue(FeatureCatalog.visionFeatures().stream().anyMatch(item -> item.getKey().equals("arrow_turn")));
     }
 
     @Test

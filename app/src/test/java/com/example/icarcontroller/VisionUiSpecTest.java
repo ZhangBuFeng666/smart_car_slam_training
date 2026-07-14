@@ -43,9 +43,18 @@ public class VisionUiSpecTest {
 
         VisionDetection detection = new VisionDetection(
                 5, "direction_arrow", 0.8, new VisionBox(),
-                "turn_right", 0.91, "turn_left"
+                "turn_right", 0.91, "turn_left", 7, true, 3
         );
-        assertEquals("左转", VisionUiSpec.detectionLabel(detection));
+        assertEquals("左转#7", VisionUiSpec.detectionLabel(detection));
         assertEquals("91%", VisionUiSpec.detectionConfidence(detection));
+    }
+
+    @Test
+    public void omitsTrackSuffixWhenTrackIdMissing() {
+        VisionDetection detection = new VisionDetection(
+                1, "car", 0.8, new VisionBox(),
+                null, null, null, null, false, 0
+        );
+        assertEquals("车辆", VisionUiSpec.detectionLabel(detection));
     }
 }

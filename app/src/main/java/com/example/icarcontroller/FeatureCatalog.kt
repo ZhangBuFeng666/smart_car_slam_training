@@ -36,14 +36,21 @@ object FeatureCatalog {
         RobotTask("warning", "限制区警卫", "检测有人靠近设备间或限制区域", "实训"),
         RobotTask("camera", "停车场相机", "启动深度相机，为车位与车辆识别做准备", "视觉"),
         RobotTask("hsv", "车辆颜色标定", "调整颜色阈值，辅助车辆颜色识别实验", "视觉"),
-        RobotTask("color_track", "目标车辆追踪", "追踪指定颜色的教学目标车辆", "视觉")
+        RobotTask("color_track", "目标车辆追踪", "追踪指定颜色的教学目标车辆", "视觉"),
+        RobotTask(
+            "arrow_turn",
+            "箭头转向演示",
+            "约 1 m 识别左右箭头后直行 0.5 m 并转 90°，适合视觉闭环演示",
+            "视觉",
+        ),
     )
 
     @JvmStatic
     fun visionFeatures(): List<FeatureItem> = listOf(
-        FeatureItem("camera", "停车场预览", "接入相机流，显示小车前方通道与车位", "待接入"),
-        FeatureItem("recognition", "车位识别", "识别车位编号、占用状态和禁停标志", "训练中"),
+        FeatureItem("camera", "停车场预览", "接入相机流，显示小车前方通道与车位", "可用"),
+        FeatureItem("recognition", "车位识别", "识别车位编号、占用状态和禁停标志", "可用"),
         FeatureItem("detection", "异常检测", "显示车辆、行人、烟雾和路障检测框", "训练中"),
+        FeatureItem("arrow_turn", "箭头转向", "深度约 1 m 锁定箭头后直行并转 90°", "可用"),
         FeatureItem("tracking", "目标复查", "结合检测结果控制小车靠近目标复查", "待接入")
     )
 

@@ -34,6 +34,9 @@ class Detection:
     direction: Optional[str] = None
     direction_confidence: Optional[float] = None
     stable_direction: Optional[str] = None
+    track_id: Optional[int] = None
+    confirmed: bool = False
+    hits: int = 0
 
     def to_dict(self):
         width, height = self.frame_size
@@ -55,6 +58,10 @@ class Detection:
             payload["direction_confidence"] = round(float(self.direction_confidence), 4)
         if self.stable_direction is not None:
             payload["stable_direction"] = self.stable_direction
+        if self.track_id is not None:
+            payload["track_id"] = int(self.track_id)
+            payload["confirmed"] = bool(self.confirmed)
+            payload["hits"] = int(self.hits)
         return payload
 
 
@@ -228,6 +235,8 @@ class VisionWorker:
         self.arrow_confidence = arrow_confidence
         self.stop_event = threading.Event()
         self.thread = None
+        from tracker import IoUTracker
+        self.tracker = IoUTracker(iou_threshold=0.3, max_age=5, min_hits=2)
 
     def start(self):
         self.thread = threading.Thread(target=self.run, name="icar-vision-inference", daemon=True)
@@ -289,11 +298,14 @@ class VisionWorker:
                                 frame, detections, arrow_classifier, arrow_votes
                             )
                             inference_ms += (time.perf_counter() - arrow_started) * 1000.0
+                        detections = self.tracker.assign_to_detections(detections)
                         for item in detections:
                             x1, y1, x2, y2 = item.box
                             color = class_color(item.class_id)
                             cv2.rectangle(original, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
                             display_label = item.stable_direction or item.direction or item.label
+                            if item.track_id is not None:
+                                display_label = "%s#%d" % (display_label, item.track_id)
                             display_confidence = item.direction_confidence or item.confidence
                             caption = "%s %.0f%%" % (display_label, display_confidence * 100)
                             cv2.putText(original, caption, (int(x1), max(18, int(y1) - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)

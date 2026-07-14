@@ -60,6 +60,16 @@ NAVIGATION_LAUNCH_FILES = {
 }
 NAVIGATION_TASK_KEYS = frozenset(NAVIGATION_LAUNCH_FILES)
 
+ARROW_TURN_REMOTE_SCRIPT = "/root/arrow_turn_demo.py"
+ARROW_TURN_STATUS_REMOTE = "/tmp/arrow_turn_status.json"
+ARROW_TURN_COMMAND = (
+    f"python3 {ARROW_TURN_REMOTE_SCRIPT} "
+    "--vision-url http://127.0.0.1:8200/vision/detections "
+    "--motion-url http://127.0.0.1:8000 "
+    f"--status-file {ARROW_TURN_STATUS_REMOTE} "
+    "--seek-speed 0.12 --linear-speed 0.12 --angular-speed 0.30"
+)
+
 COMMON_TASK_COMMANDS = {
     "base": "ros2 run icar_bringup Mcnamu_driver_X3",
     "lidar": "ros2 launch sllidar_ros2 sllidar_launch.py",
@@ -69,6 +79,7 @@ COMMON_TASK_COMMANDS = {
     "camera": "ros2 launch astra_camera astra.launch.xml",
     "hsv": "ros2 run icar_astra colorHSV",
     "color_track": "ros2 run icar_astra colorTracker",
+    "arrow_turn": ARROW_TURN_COMMAND,
 }
 
 
@@ -101,6 +112,7 @@ TASK_PATTERNS = {
     "camera": "astra_camera",
     "hsv": "colorHSV",
     "color_track": "colorTracker",
+    "arrow_turn": "arrow_turn_demo.py",
     "map_gmapping": "map_gmapping_launch.py",
     "map_display": "display_map_launch.py",
     "map_save": "save_map_launch.py",
@@ -1001,6 +1013,81 @@ def close_task_log(task):
         handle.close()
 
 
+def arrow_turn_host_script_candidates():
+    here = Path(__file__).resolve().parent
+    return [
+        Path.home() / "icar_vision" / "arrow_turn_demo.py",
+        here.parent / "jetson_perception" / "arrow_turn_demo.py",
+        here / "arrow_turn_demo.py",
+    ]
+
+
+def sync_arrow_turn_script(container):
+    """Copy the latest demo script into the ROS container before launch."""
+    if SERVER_CONFIG["dry_run"]:
+        return {"synced": False, "dry_run": True}
+    for host_path in arrow_turn_host_script_candidates():
+        if not host_path.is_file():
+            continue
+        result = run_host(
+            ["docker", "cp", str(host_path), f"{container}:{ARROW_TURN_REMOTE_SCRIPT}"],
+            timeout=15,
+            output_limit=2000,
+        )
+        return {
+            "synced": result["returncode"] == 0,
+            "source": str(host_path),
+            "destination": ARROW_TURN_REMOTE_SCRIPT,
+            "returncode": result["returncode"],
+            "stderr": result.get("stderr", ""),
+        }
+    return {
+        "synced": False,
+        "error": "arrow_turn_demo.py not found on host",
+        "searched": [str(path) for path in arrow_turn_host_script_candidates()],
+    }
+
+
+def read_arrow_turn_status():
+    """Combine process liveness with the demo's latest status JSON."""
+    process = task_processes("arrow_turn")
+    running = bool(process)
+    body = {
+        "running": running,
+        "process": process,
+        "phase": None,
+        "note": None,
+        "direction": None,
+        "distance_m": None,
+        "track_id": None,
+        "updated_at": None,
+    }
+    if SERVER_CONFIG["dry_run"]:
+        return body
+    if not container_is_running():
+        body["error"] = "container is not running"
+        return body
+    result = run_once(
+        f"cat {shlex.quote(ARROW_TURN_STATUS_REMOTE)} 2>/dev/null || true",
+        timeout=3,
+        output_limit=4000,
+    )
+    raw = (result.get("stdout") or "").strip()
+    if not raw:
+        return body
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        body["error"] = "status json invalid"
+        return body
+    if isinstance(payload, dict):
+        for key in ("phase", "note", "direction", "distance_m", "track_id", "updated_at"):
+            if key in payload:
+                body[key] = payload.get(key)
+        body["status"] = payload
+    return body
+
+
 def start_task(task):
     if task not in TASK_COMMANDS:
         return 404, {"error": f"unknown task: {task}"}
@@ -1017,6 +1104,18 @@ def start_task(task):
     if existing:
         return 200, {"task": task, "status": "already_running", "process": existing}
 
+    sync_info = None
+    if task == "arrow_turn":
+        sync_info = sync_arrow_turn_script(SERVER_CONFIG["container"])
+        if not sync_info.get("synced"):
+            return 503, {
+                "task": task,
+                "status": "start_failed",
+                "ok": False,
+                "error": "arrow turn script unavailable",
+                "sync": sync_info,
+            }
+
     log_directory = Path(__file__).with_name("logs")
     log_directory.mkdir(parents=True, exist_ok=True)
     log_path = log_directory / f"{task}.log"
@@ -1028,7 +1127,7 @@ def start_task(task):
     time.sleep(0.8)
     discovered = task_processes(task)
     status = "started" if discovered else "start_failed"
-    return 200, {
+    body = {
         "task": task,
         "status": status,
         "ok": bool(discovered),
@@ -1036,6 +1135,9 @@ def start_task(task):
         "process": discovered,
         "log": os.path.relpath(log_path, Path(__file__).parent),
     }
+    if sync_info is not None:
+        body["sync"] = sync_info
+    return 200, body
 
 
 def stop_task_batch(tasks, preserve_patterns=()):
@@ -1597,6 +1699,8 @@ class Handler(BaseHTTPRequestHandler):
             if CAMERA_STREAM is None:
                 return 503, {"state": "unavailable", "error": "camera service unavailable"}
             return 200, CAMERA_STREAM.restart()
+        if path == "arrow_turn/status":
+            return 200, read_arrow_turn_status()
         if path.startswith("notify/"):
             event = unquote(path.split("/", 1)[1])
             text = NOTIFICATION_MESSAGES.get(event)

@@ -58,6 +58,7 @@ import java.util.concurrent.Executors
 
 private const val VISION_PORT = 8200
 private const val VISION_POLL_INTERVAL_MILLIS = 1_000L
+private const val ARROW_TURN_POLL_INTERVAL_MILLIS = 800L
 
 private data class FullscreenAccessibilityState(
     val view: View,
@@ -95,6 +96,7 @@ class MainActivity : Activity() {
     private var visionModelStatusText: TextView? = null
     private var visionPerformanceText: TextView? = null
     private var visionDetectionList: LinearLayout? = null
+    private var arrowTurnStatusText: TextView? = null
     private val visionMetricValues = mutableListOf<TextView>()
     private var parkingMapView: ParkingMapView? = null
     private var parkingMapCaption: TextView? = null
@@ -140,6 +142,8 @@ class MainActivity : Activity() {
     @Volatile private var visionPollInFlight = false
     private var visionPollingToken = 0L
     private val visionPollRunnable = Runnable { pollVisionState() }
+    @Volatile private var arrowTurnPollInFlight = false
+    private val arrowTurnPollRunnable = Runnable { pollArrowTurnStatus() }
 
     private val repeatMoveRunnable = object : Runnable {
         override fun run() {
@@ -533,8 +537,45 @@ class MainActivity : Activity() {
             status = "边缘 AI"
         ))
         pageContent.addView(parkingVisionSurface())
+        pageContent.addView(parkingArrowTurnDemo())
         pageContent.addView(parkingVisionSummary())
         pageContent.addView(parkingVisionClassRail())
+    }
+
+    private fun parkingArrowTurnDemo(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(palette.surface, palette.border, 18)
+        setPadding(dp(14), dp(14), dp(14), dp(14))
+        layoutParams = matchWrapParams(bottom = 12)
+        addView(parkingSectionTitle("箭头转向演示", "约 1 m 锁定左右箭头后直行 0.5 m 并转 90°。运行中请勿摇杆控车。"))
+        addView(TextView(this@MainActivity).apply {
+            text = "未运行"
+            setTextColor(color(palette.textSecondary))
+            textSize = 12f
+            setPadding(0, dp(4), 0, dp(8))
+            arrowTurnStatusText = this
+        })
+        val actions = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingPrimaryButton("开始转向演示") {
+                currentDirection = null
+                mainHandler.removeCallbacks(repeatMoveRunnable)
+                sendGet(api().startTaskUrl("camera"), "启动深度相机")
+                sendGet(api().startTaskUrl("base"), "启动底盘驱动")
+                sendGet(api().startTaskUrl("arrow_turn"), "启动箭头转向演示")
+                mainHandler.removeCallbacks(arrowTurnPollRunnable)
+                mainHandler.post(arrowTurnPollRunnable)
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(parkingOutlineButton("停止演示") {
+                sendGet(api().stopTaskUrl("arrow_turn"), "停止箭头转向演示")
+                mainHandler.removeCallbacks(arrowTurnPollRunnable)
+                mainHandler.post(arrowTurnPollRunnable)
+            }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+                setMargins(dp(9), 0, 0, 0)
+            })
+        }
+        addView(actions, matchWrapParams(top = 4))
     }
 
     private fun renderNavigation() {
@@ -1831,20 +1872,67 @@ class MainActivity : Activity() {
         }
         mainHandler.removeCallbacks(visionPollRunnable)
         mainHandler.post(visionPollRunnable)
+        mainHandler.removeCallbacks(arrowTurnPollRunnable)
+        mainHandler.post(arrowTurnPollRunnable)
     }
 
     private fun stopVisionPage() {
         visionPollingGate.stop()
         mainHandler.removeCallbacks(visionPollRunnable)
+        mainHandler.removeCallbacks(arrowTurnPollRunnable)
         visionStreamView?.stop()
     }
 
     private fun releaseVisionPage() {
         visionPollingGate.stop()
         mainHandler.removeCallbacks(visionPollRunnable)
+        mainHandler.removeCallbacks(arrowTurnPollRunnable)
         visionStreamView?.release()
         visionStreamView = null
         visionOverlayView = null
+        arrowTurnStatusText = null
+    }
+
+    private fun pollArrowTurnStatus() {
+        if (selectedPage != "vision") return
+        if (arrowTurnPollInFlight) {
+            mainHandler.postDelayed(arrowTurnPollRunnable, ARROW_TURN_POLL_INTERVAL_MILLIS)
+            return
+        }
+        arrowTurnPollInFlight = true
+        val url = api().arrowTurnStatusUrl()
+        visionExecutor.execute {
+            val result = runCatching {
+                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 1_500
+                    readTimeout = 2_000
+                    useCaches = false
+                }
+                try {
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    check(code in 200..299) { "HTTP $code ${body.take(120)}" }
+                    ArrowTurnStatusParser.parse(body)
+                } finally {
+                    connection.disconnect()
+                }
+            }
+            runOnUiThread {
+                if (selectedPage == "vision") {
+                    result.onSuccess { status ->
+                        arrowTurnStatusText?.text = ArrowTurnUiSpec.statusText(status)
+                    }.onFailure {
+                        arrowTurnStatusText?.text = it.message ?: "状态不可用"
+                    }
+                }
+                arrowTurnPollInFlight = false
+                if (selectedPage == "vision" && !isFinishing) {
+                    mainHandler.postDelayed(arrowTurnPollRunnable, ARROW_TURN_POLL_INTERVAL_MILLIS)
+                }
+            }
+        }
     }
 
     private fun pollVisionState() {
@@ -1956,7 +2044,8 @@ class MainActivity : Activity() {
                     setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(TextView(this@MainActivity).apply {
-                    text = VisionUiSpec.detectionConfidence(detection)
+                    text = detection.trackId?.let { "ID $it · ${VisionUiSpec.detectionConfidence(detection)}" }
+                        ?: VisionUiSpec.detectionConfidence(detection)
                     setTextColor(color(palette.accentText))
                     textSize = 11f
                     setTypeface(Typeface.DEFAULT, Typeface.BOLD)

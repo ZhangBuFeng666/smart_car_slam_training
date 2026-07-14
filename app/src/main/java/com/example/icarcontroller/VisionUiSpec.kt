@@ -30,7 +30,9 @@ object VisionUiSpec {
     @JvmStatic
     fun detectionLabel(detection: VisionDetection): String {
         val direction = detection.stableDirection ?: detection.direction
-        return direction?.let(::directionText) ?: labelText(detection.label)
+        val base = direction?.let(::directionText) ?: labelText(detection.label)
+        val trackId = detection.trackId ?: return base
+        return "$base#$trackId"
     }
 
     @JvmStatic

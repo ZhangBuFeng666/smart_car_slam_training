@@ -30,6 +30,7 @@ public class VisionApiTest {
                 "  \"detections\": [\n" +
                 "    {\"class_id\": 5, \"label\": \"direction_arrow\", \"confidence\": 0.563,\n" +
                 "     \"direction\": \"turn_left\", \"direction_confidence\": 0.934, \"stable_direction\": \"turn_left\",\n" +
+                "     \"track_id\": 3, \"confirmed\": true, \"hits\": 4,\n" +
                 "     \"box\": {\"left\": 0.1, \"top\": 0.2, \"right\": 0.6, \"bottom\": 0.9}}\n" +
                 "  ]\n" +
                 "}");
@@ -49,6 +50,9 @@ public class VisionApiTest {
         assertEquals("turn_left", snapshot.getDetections().get(0).getDirection());
         assertEquals(0.934, snapshot.getDetections().get(0).getDirectionConfidence(), 0.001);
         assertEquals("turn_left", snapshot.getDetections().get(0).getStableDirection());
+        assertEquals(Integer.valueOf(3), snapshot.getDetections().get(0).getTrackId());
+        assertTrue(snapshot.getDetections().get(0).getConfirmed());
+        assertEquals(4, snapshot.getDetections().get(0).getHits());
         assertEquals(0.6, snapshot.getDetections().get(0).getBox().getRight(), 0.001);
     }
 
@@ -62,6 +66,9 @@ public class VisionApiTest {
         assertNull(snapshot.getDetections().get(0).getDirection());
         assertNull(snapshot.getDetections().get(0).getDirectionConfidence());
         assertNull(snapshot.getDetections().get(0).getStableDirection());
+        assertNull(snapshot.getDetections().get(0).getTrackId());
+        assertFalse(snapshot.getDetections().get(0).getConfirmed());
+        assertEquals(0, snapshot.getDetections().get(0).getHits());
     }
 
     @Test

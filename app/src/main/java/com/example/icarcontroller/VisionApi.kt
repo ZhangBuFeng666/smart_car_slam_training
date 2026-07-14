@@ -47,7 +47,10 @@ data class VisionDetection(
     val box: VisionBox,
     val direction: String? = null,
     val directionConfidence: Double? = null,
-    val stableDirection: String? = null
+    val stableDirection: String? = null,
+    val trackId: Int? = null,
+    val confirmed: Boolean = false,
+    val hits: Int = 0
 )
 
 data class VisionSnapshot(
@@ -88,7 +91,12 @@ object VisionSnapshotParser {
                             directionConfidence = if (
                                 item.has("direction_confidence") && !item.isNull("direction_confidence")
                             ) item.optDouble("direction_confidence") else null,
-                            stableDirection = item.optNullableString("stable_direction")
+                            stableDirection = item.optNullableString("stable_direction"),
+                            trackId = if (item.has("track_id") && !item.isNull("track_id")) {
+                                item.optInt("track_id")
+                            } else null,
+                            confirmed = item.optBoolean("confirmed", false),
+                            hits = item.optInt("hits", 0)
                         )
                     )
                 }

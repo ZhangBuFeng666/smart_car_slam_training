@@ -95,6 +95,7 @@ public class CarApiTest {
         assertEquals("http://10.161.57.230:8000/camera/stream", api.cameraStreamUrl());
         assertEquals("http://10.161.57.230:8000/camera/status", api.cameraStatusUrl());
         assertEquals("http://10.161.57.230:8000/camera/restart", api.cameraRestartUrl());
+        assertEquals("http://10.161.57.230:8000/arrow_turn/status", api.arrowTurnStatusUrl());
     }
 
     @Test

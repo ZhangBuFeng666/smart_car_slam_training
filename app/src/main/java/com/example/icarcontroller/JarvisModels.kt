@@ -110,6 +110,26 @@ object JarvisTaskActions {
     }
 }
 
+object JarvisControlTaskPolling {
+    private const val AUTOMATIC_START_ENABLED = false
+
+    @JvmStatic
+    fun shouldContinue(task: JarvisControlTask): Boolean =
+        when (task.state) {
+            JarvisControlTaskState.COMPLETED,
+            JarvisControlTaskState.STOPPED,
+            JarvisControlTaskState.FAILED,
+            JarvisControlTaskState.READY,
+            JarvisControlTaskState.PREPARATION_FAILED -> false
+            JarvisControlTaskState.RUNNING -> task.kind != "feature"
+            else -> true
+        }
+
+    @JvmStatic
+    fun shouldAutoStart(task: JarvisControlTask, autoStartRequested: Boolean): Boolean =
+        AUTOMATIC_START_ENABLED && autoStartRequested && task.state == JarvisControlTaskState.READY
+}
+
 data class JarvisControlTask(
     val id: String,
     val title: String,

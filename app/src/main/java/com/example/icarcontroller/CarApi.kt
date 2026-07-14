@@ -22,6 +22,8 @@ class CarApi(host: String, private val port: Int) {
 
     fun speakUrl(): String = "$baseUrl/speak"
 
+    fun speechEnqueueUrl(): String = "$baseUrl/speech/enqueue"
+
     fun notifyUrl(event: String): String = "$baseUrl/notify/${encode(event)}"
 
     fun startTaskUrl(task: String): String = "$baseUrl/start/${encode(task)}"

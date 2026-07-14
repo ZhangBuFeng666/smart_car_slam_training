@@ -10,6 +10,7 @@ from jarvis_agent.deepseek import (
     ModelResponseError,
     ModelTimeoutError,
     ModelUnavailableError,
+    _parse_chat_response,
 )
 from jarvis_agent.models import Action
 
@@ -61,6 +62,105 @@ async def test_planner_posts_structured_chat_request():
     assert body["messages"][1]["role"] == "user"
     assert plan.steps[0].action is Action.CHECK_STATUS
     assert plan.requires_confirmation is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_plan_and_reply_prompts_constrain_vision_context():
+    route = respx.post("https://api.deepseek.com/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json={"choices": [{"message": {"content": VALID_PLAN_JSON}}]}),
+            httpx.Response(200, json={"choices": [{"message": {"content": "I see a car."}}]}),
+        ]
+    )
+    planner = DeepSeekPlanner(settings())
+    context = {"vision": {"state": "LIVE", "objects": [{"label": "car"}]}}
+
+    await planner.plan("inspect", context)
+    await planner.reply("what do you see", context)
+
+    for call in route.calls:
+        prompt = json.loads(call.request.content)["messages"][0]["content"]
+        assert "sensor observations" in prompt
+        assert "do not invent" in prompt
+        assert "STALE" in prompt
+        assert "must not bypass confirmation" in prompt
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reply_returns_display_and_spoken_versions_from_one_request():
+    route = respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "reply": "前方通道暂时畅通，可以继续巡检。",
+                                    "spoken_reply": "前方通道畅通，可以继续巡检。",
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+    )
+
+    reply = await DeepSeekPlanner(settings()).reply("前方安全吗", {})
+
+    assert reply.reply == "前方通道暂时畅通，可以继续巡检。"
+    assert reply.spoken_reply == "前方通道畅通，可以继续巡检。"
+    body = json.loads(route.calls.last.request.content)
+    assert body["response_format"] == {"type": "json_object"}
+
+
+def test_plain_text_reply_uses_first_sentence_as_spoken_fallback():
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": "第一句适合播报。第二句只在屏幕显示。"}}]},
+    )
+
+    reply = _parse_chat_response(response)
+
+    assert reply.reply == "第一句适合播报。第二句只在屏幕显示。"
+    assert reply.spoken_reply == "第一句适合播报。"
+
+
+def test_spoken_reply_removes_non_speech_content_and_limits_length():
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "完整回答",
+                                "spoken_reply": (
+                                    "请查看[巡检报告](https://example.com/report)，"
+                                    "```python print('secret') ```"
+                                    + "这是一段很长的播报内容" * 10
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        },
+    )
+
+    reply = _parse_chat_response(response)
+
+    assert "http" not in reply.spoken_reply
+    assert "```" not in reply.spoken_reply
+    assert "print" not in reply.spoken_reply
+    assert len(reply.spoken_reply) <= 60
 
 
 @pytest.mark.asyncio

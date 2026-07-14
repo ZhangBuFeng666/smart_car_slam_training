@@ -35,6 +35,21 @@ public class JarvisChatItemCodecTest {
     }
 
     @Test
+    public void roundTripsAssistantSpokenTextAndReadsOldHistory() {
+        JarvisChatItem.AssistantMessage assistant = new JarvisChatItem.AssistantMessage(
+                "完整回答", "10:22", "口语摘要"
+        );
+
+        JarvisChatItem restored = JarvisChatItemCodec.decode(JarvisChatItemCodec.encode(assistant));
+        JarvisChatItem oldRecord = JarvisChatItemCodec.decode(new JarvisEncodedChatItem(
+                "assistant", "{\"text\":\"旧回答\",\"timestamp\":\"10:21\"}"
+        ));
+
+        assertEquals(assistant, restored);
+        assertEquals(null, ((JarvisChatItem.AssistantMessage) oldRecord).getSpokenText());
+    }
+
+    @Test
     public void roundTripsPlanProgressAndReportCards() {
         JarvisMissionPlan plan = new JarvisMissionPlan(
                 "巡检 B2",

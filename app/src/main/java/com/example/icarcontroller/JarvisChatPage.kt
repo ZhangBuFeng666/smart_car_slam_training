@@ -20,6 +20,10 @@ import android.widget.LinearLayout
 import android.widget.LinearLayout.LayoutParams
 import android.widget.ScrollView
 import android.widget.TextView
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 
 class JarvisChatPage(
@@ -29,11 +33,17 @@ class JarvisChatPage(
     private val executor: ExecutorService,
     private val conversations: JarvisConversationController,
     private val onStatus: (String) -> Unit,
+    private val onCancelLocalMotion: () -> Unit,
+    private val onForceStopControl: () -> Unit,
     private val onEmergencyStop: () -> Unit,
 ) : FrameLayout(context) {
     private val palette = ParkingThemeSpec.palette(themeMode)
     private val credentials = JarvisCredentials(context)
+    private val speechPreferences = JarvisSpeechPreferences(context)
+    private val localSafety = JarvisLocalSafety(onCancelLocalMotion)
     private var token = credentials.loadToken()
+    private var speechEnabled = speechPreferences.isEnabled()
+    private var lastReplayAt = 0L
     private var missionId: String? = null
     private var currentPlan: JarvisMissionPlan? = null
     private var state = conversations.currentState()
@@ -123,6 +133,7 @@ class JarvisChatPage(
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        addView(speechToggleButton(), LinearLayout.LayoutParams(dp(48), dp(48)))
         addView(headerIcon(android.R.drawable.ic_input_add, "新建对话") {
             requestConversationChange { openNewConversation() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
@@ -137,6 +148,27 @@ class JarvisChatPage(
             setPadding(dp(12), dp(12), dp(12), dp(12))
             setOnClickListener { action() }
         }
+
+    private fun speechToggleButton(): ImageButton = ImageButton(context).apply {
+        background = null
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        fun refresh() {
+            setImageResource(
+                if (speechEnabled) android.R.drawable.ic_lock_silent_mode_off
+                else android.R.drawable.ic_lock_silent_mode
+            )
+            setColorFilter(color(if (speechEnabled) palette.accentText else palette.textSecondary))
+            alpha = if (speechEnabled) 1f else 0.58f
+            contentDescription = JarvisUiSpec.speechToggleDescription(speechEnabled)
+        }
+        setOnClickListener {
+            speechEnabled = !speechEnabled
+            speechPreferences.setEnabled(speechEnabled)
+            refresh()
+            onStatus(JarvisUiSpec.speechToggleDescription(speechEnabled))
+        }
+        refresh()
+    }
 
     fun handleBack(): Boolean {
         if (historyDrawer.visibility != View.VISIBLE) return false
@@ -255,6 +287,10 @@ class JarvisChatPage(
             })
             addView(body("切换对话前，请选择如何处理当前任务。"), lp(top = 8, bottom = 12))
             addView(primaryButton("停止任务并切换") {
+                localSafety.beforeControlTaskStop()
+                onForceStopControl()
+                reduceEvent(JarvisEvent.ControlTaskLocallyStopped(task.id))
+                render()
                 val savedToken = saveToken()
                 executor.execute {
                     val result = runCatching { JarvisApi(host, savedToken).stopControlTask(task.id) }
@@ -340,6 +376,7 @@ class JarvisChatPage(
         setPadding(0, dp(4), 0, 0)
         addView(input, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         addView(iconButton("!") {
+            localSafety.beforeEmergencyStop()
             onEmergencyStop()
             reduceEvent(JarvisEvent.SystemMessageAdded("已发送急停指令。"))
             render()
@@ -372,7 +409,7 @@ class JarvisChatPage(
             chatList.addView(
                 when (item) {
                     is JarvisChatItem.UserMessage -> bubble(item.text, Gravity.END, palette.accentSoft, palette.accent)
-                    is JarvisChatItem.AssistantMessage -> bubble(item.text, Gravity.START, palette.surface, palette.border)
+                    is JarvisChatItem.AssistantMessage -> assistantBubble(item)
                     is JarvisChatItem.PlanCard -> planCard(item.plan)
                     is JarvisChatItem.ControlTaskCard -> controlTaskCard(item.task)
                     is JarvisChatItem.ProgressCard -> progressCard(item.mission, item.timeline)
@@ -400,7 +437,9 @@ class JarvisChatPage(
         onStatus("Jarvis 正在生成计划")
         render()
         executor.execute {
-            val result = runCatching { JarvisApi(host, savedToken).chat(message) }
+            val result = runCatching {
+                JarvisApi(host, savedToken).chat(message, speechEnabled = speechEnabled)
+            }
             runOnUiThread {
                 result.fold(
                     onSuccess = { response ->
@@ -409,9 +448,12 @@ class JarvisChatPage(
                         if (controlTask != null) {
                             reduceEvent(JarvisEvent.ControlTaskReady(controlTask), conversationId)
                             onStatus("Jarvis 正在准备控制任务")
-                            pollControlTask(controlTask.id, conversationId)
+                            pollControlTask(controlTask.id, conversationId, autoStartWhenReady = true)
                         } else if (plan == null) {
-                            reduceEvent(JarvisEvent.ChatReply(response.reply), conversationId)
+                            reduceEvent(
+                                JarvisEvent.ChatReply(response.reply, response.spokenReply),
+                                conversationId
+                            )
                             onStatus("Jarvis")
                         } else {
                             currentPlan = plan
@@ -621,7 +663,7 @@ class JarvisChatPage(
                 result.onSuccess {
                     reduceEvent(JarvisEvent.ControlTaskUpdated(it), conversationId)
                     render()
-                    pollControlTask(taskId, conversationId)
+                    pollControlTask(taskId, conversationId, autoStartWhenReady = false)
                 }.onFailure { appendError(it.message ?: "控制任务启动失败") }
             }
         }
@@ -630,24 +672,30 @@ class JarvisChatPage(
     private fun prepareControlTask(taskId: String) {
         val savedToken = saveToken()
         val conversationId = conversations.currentConversationId()
+        reduceEvent(JarvisEvent.ControlTaskRestartRequested(taskId), conversationId)
         executor.execute {
             val result = runCatching { JarvisApi(host, savedToken).prepareControlTask(taskId) }
             runOnUiThread {
                 result.onSuccess {
                     reduceEvent(JarvisEvent.ControlTaskUpdated(it), conversationId)
                     render()
-                    pollControlTask(taskId, conversationId)
+                    pollControlTask(taskId, conversationId, autoStartWhenReady = false)
                 }.onFailure { appendError(it.message ?: "控制任务准备失败") }
             }
         }
     }
 
-    private fun pollControlTask(taskId: String, conversationId: String) {
+    private fun pollControlTask(
+        taskId: String,
+        conversationId: String,
+        autoStartWhenReady: Boolean = false
+    ) {
         val savedToken = saveToken()
         executor.execute {
             val api = JarvisApi(host, savedToken)
+            var autoStartPending = autoStartWhenReady
             while (true) {
-                val task = runCatching { api.getControlTask(taskId) }.getOrElse {
+                var task = runCatching { api.getControlTask(taskId) }.getOrElse {
                     runOnUiThread { appendError(it.message ?: "控制任务进度读取失败") }
                     return@execute
                 }
@@ -655,13 +703,18 @@ class JarvisChatPage(
                     reduceEvent(JarvisEvent.ControlTaskUpdated(task), conversationId)
                     if (conversations.currentConversationId() == conversationId) render()
                 }
-                if (task.state in setOf(
-                    JarvisControlTaskState.COMPLETED,
-                    JarvisControlTaskState.STOPPED,
-                    JarvisControlTaskState.FAILED,
-                    JarvisControlTaskState.READY,
-                    JarvisControlTaskState.PREPARATION_FAILED
-                )) return@execute
+                if (JarvisControlTaskPolling.shouldAutoStart(task, autoStartPending)) {
+                    autoStartPending = false
+                    task = runCatching { api.startControlTask(taskId) }.getOrElse {
+                        runOnUiThread { appendError(it.message ?: "控制任务启动失败") }
+                        return@execute
+                    }
+                    runOnUiThread {
+                        reduceEvent(JarvisEvent.ControlTaskUpdated(task), conversationId)
+                        if (conversations.currentConversationId() == conversationId) render()
+                    }
+                }
+                if (!JarvisControlTaskPolling.shouldContinue(task)) return@execute
                 Thread.sleep(500)
             }
         }
@@ -681,6 +734,10 @@ class JarvisChatPage(
     }
 
     private fun stopControlTask(taskId: String) {
+        localSafety.beforeControlTaskStop()
+        onForceStopControl()
+        reduceEvent(JarvisEvent.ControlTaskLocallyStopped(taskId), conversations.currentConversationId())
+        render()
         val savedToken = saveToken()
         val conversationId = conversations.currentConversationId()
         executor.execute {
@@ -732,6 +789,62 @@ class JarvisChatPage(
             maxWidth = (resources.displayMetrics.widthPixels * 0.72f).toInt()
         }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         layoutParams = lp(top = 6, bottom = 6)
+    }
+
+    private fun assistantBubble(item: JarvisChatItem.AssistantMessage): LinearLayout =
+        LinearLayout(context).apply {
+            gravity = Gravity.START or Gravity.BOTTOM
+            addView(TextView(context).apply {
+                text = item.text
+                setTextColor(color(palette.textPrimary))
+                textSize = 13f
+                setLineSpacing(dp(2).toFloat(), 1.0f)
+                background = rounded(palette.surface, palette.border, 18)
+                setPadding(dp(12), dp(9), dp(12), dp(9))
+                maxWidth = (resources.displayMetrics.widthPixels * 0.68f).toInt()
+            }, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+            if (JarvisUiSpec.canReplaySpeech(item.spokenText)) {
+                addView(
+                    headerIcon(
+                        android.R.drawable.ic_lock_silent_mode_off,
+                        "重新播报"
+                    ) { replaySpeech(item.spokenText.orEmpty()) },
+                    LayoutParams(dp(40), dp(40)).apply { setMargins(dp(4), 0, 0, 0) }
+                )
+            }
+            layoutParams = lp(top = 6, bottom = 6)
+        }
+
+    private fun replaySpeech(text: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastReplayAt < 700L || text.isBlank()) return
+        lastReplayAt = now
+        executor.execute {
+            val result = runCatching {
+                val payload = JSONObject()
+                    .put("text", text)
+                    .put("source", "jarvis_app_replay")
+                    .put("request_id", UUID.randomUUID().toString())
+                    .toString()
+                val connection = (URL(CarApi(host, 8000).speechEnqueueUrl())
+                    .openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 900
+                    readTimeout = 1800
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                connection.outputStream.use { output ->
+                    output.write(payload.toByteArray(Charsets.UTF_8))
+                }
+                val code = connection.responseCode
+                connection.disconnect()
+                check(code in 200..299) { "HTTP $code" }
+            }
+            runOnUiThread {
+                onStatus(if (result.isSuccess) "语音已加入播报队列" else "语音重播失败")
+            }
+        }
     }
 
     private fun systemRow(textValue: String): TextView = TextView(context).apply {

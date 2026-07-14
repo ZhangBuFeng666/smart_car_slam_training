@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from jarvis_agent.config import Settings
-from jarvis_agent.control_client import ControlClient
+from jarvis_agent.control_client import ControlClient, ControlServiceError
 from jarvis_agent.deepseek import (
     DeepSeekPlanner,
     ModelResponseError,
@@ -39,8 +39,16 @@ from jarvis_agent.models import (
 from jarvis_agent.reporting import ReportService
 from jarvis_agent.repository import Repository
 from jarvis_agent.validator import PlanValidationError, validate_plan
+from jarvis_agent.vision_context import VisionContextCollector
 
 logger = logging.getLogger(__name__)
+
+ACTIVE_CONTROL_TASK_STATES = {
+    ControlTaskState.PREPARING,
+    ControlTaskState.READY,
+    ControlTaskState.STARTING,
+    ControlTaskState.RUNNING,
+}
 
 
 class ErrorBody(BaseModel):
@@ -53,17 +61,23 @@ def create_app(
     planner: Optional[Any] = None,
     control: Optional[Any] = None,
     repository: Optional[Repository] = None,
+    vision: Optional[Any] = None,
 ) -> FastAPI:
     settings = settings or Settings()
     repository = repository or Repository(Path(settings.database_path))
     repository.initialize()
     planner = planner or DeepSeekPlanner(settings)
     control = control or ControlClient(settings)
+    vision = vision or VisionContextCollector(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         repository.initialize()
-        yield
+        vision.start()
+        try:
+            yield
+        finally:
+            vision.stop()
 
     app = FastAPI(title="Jarvis Agent", version="0.1.0", lifespan=lifespan)
     engine = MissionEngine(repository, control)
@@ -74,6 +88,84 @@ def create_app(
     control_tasks = {}
     control_specs = {}
     control_cancellations = {}
+
+    async def chat_response(
+        request,
+        reply,
+        spoken_reply=None,
+        plan=None,
+        control_task=None,
+    ):
+        spoken = str(spoken_reply or reply or "").strip()
+        if not request.speech_enabled:
+            return ChatResponse(
+                reply=reply,
+                plan=plan,
+                control_task=control_task,
+            )
+        speech = {"state": "skipped"}
+        if spoken:
+            request_id = str(uuid.uuid4())
+            try:
+                queued = await control.enqueue_speech(spoken, request_id)
+                speech = {
+                    "state": queued.get("state", "queued"),
+                    "request_id": queued.get("request_id", request_id),
+                }
+            except (AttributeError, ControlServiceError, RuntimeError):
+                speech = {"state": "unavailable", "request_id": request_id}
+        return ChatResponse(
+            reply=reply,
+            spoken_reply=spoken or None,
+            speech=speech,
+            plan=plan,
+            control_task=control_task,
+        )
+
+    def active_feature_task(task_name):
+        for task_id, task in reversed(tuple(control_tasks.items())):
+            spec = control_specs.get(task_id, {})
+            if (
+                spec.get("kind") == "feature"
+                and spec.get("task") == task_name
+                and task.state in ACTIVE_CONTROL_TASK_STATES
+            ):
+                return task
+        return None
+
+    def mark_feature_tasks_stopped(task_name):
+        for task_id, task in tuple(control_tasks.items()):
+            spec = control_specs.get(task_id, {})
+            if (
+                spec.get("kind") == "feature"
+                and spec.get("task") == task_name
+                and task.state in ACTIVE_CONTROL_TASK_STATES
+            ):
+                cancellation = control_cancellations.get(task_id)
+                if cancellation is not None:
+                    cancellation.set()
+                control_tasks[task_id] = task.model_copy(
+                    update={
+                        "state": ControlTaskState.STOPPED,
+                        "current_message": "任务已停止",
+                        "result": "已停止",
+                    }
+                )
+
+    def mark_all_control_tasks_stopped():
+        for task_id, task in tuple(control_tasks.items()):
+            if task.state not in ACTIVE_CONTROL_TASK_STATES:
+                continue
+            cancellation = control_cancellations.get(task_id)
+            if cancellation is not None:
+                cancellation.set()
+            control_tasks[task_id] = task.model_copy(
+                update={
+                    "state": ControlTaskState.STOPPED,
+                    "current_message": "任务已停止",
+                    "result": "已停止",
+                }
+            )
 
     def begin_preparation(task_id: str):
         cancellation = threading.Event()
@@ -119,7 +211,17 @@ def create_app(
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        vision_health = vision.health()
+        return {
+            "status": "ok",
+            "vision_state": vision_health["state"],
+            "vision_updated_at": vision_health["updated_at"],
+            "vision_error": vision_health["error"],
+        }
+
+    @app.get("/api/v1/scene", dependencies=[Depends(require_auth)])
+    def scene():
+        return vision.snapshot()
 
     @app.post(
         "/api/v1/chat",
@@ -128,9 +230,11 @@ def create_app(
         dependencies=[Depends(require_auth)],
     )
     async def chat(request: ChatRequest):
+        context = dict(request.context)
+        context["vision"] = vision.snapshot()
         if _is_task_request(request.message):
             try:
-                plan = validate_plan(await planner.plan(request.message, request.context))
+                plan = validate_plan(await planner.plan(request.message, context))
             except ModelTimeoutError as exc:
                 raise _http_error(504, "MODEL_TIMEOUT", "Model request timed out") from exc
             except ModelUnavailableError as exc:
@@ -138,18 +242,30 @@ def create_app(
             except (ModelResponseError, PlanValidationError) as exc:
                 logger.warning("Model returned invalid plan; falling back to clarification", exc_info=exc)
                 plan = _fallback_clarification_plan(request.message)
-            return ChatResponse(reply="Plan ready for confirmation.", plan=plan)
+            return await chat_response(
+                request,
+                "Plan ready for confirmation.",
+                "计划已生成，请在屏幕上确认。",
+                plan=plan,
+            )
+
+        if _is_stop_all_command(request.message):
+            await control.move("stop")
+            await control.stop_all()
+            mark_all_control_tasks_stopped()
+            return await chat_response(request, "所有功能和运动任务已停止。")
 
         motion_command = _direct_motion_command(request.message)
         if motion_command is not None:
             if motion_command[0] == "stop":
                 await control.move("stop")
-                return ChatResponse(reply="小车已停止。", plan=None)
+                return await chat_response(request, "小车已停止。")
             task, spec = _motion_control_task(motion_command)
             control_tasks[task.id] = task
             control_specs[task.id] = spec
-            return ChatResponse(
-                reply="正在完成启动前准备。",
+            return await chat_response(
+                request,
+                "正在完成启动前准备。",
                 control_task=begin_preparation(task.id),
             )
 
@@ -157,21 +273,34 @@ def create_app(
         if direct_command is not None:
             task, label, start = direct_command
             if not start:
+                await control.move("stop")
                 await control.stop_task(task)
-                return ChatResponse(reply="已成功关闭%s功能。" % label, plan=None)
+                mark_feature_tasks_stopped(task)
+                return await chat_response(request, "已成功关闭%s功能。" % label)
+            existing = active_feature_task(task)
+            if existing is not None:
+                return await chat_response(
+                    request, "该功能已有活动任务。", control_task=existing
+                )
             view, spec = _feature_control_task(task, label)
             control_tasks[view.id] = view
             control_specs[view.id] = spec
-            return ChatResponse(
-                reply="正在完成启动前准备。",
+            return await chat_response(
+                request,
+                "正在完成启动前准备。",
                 control_task=begin_preparation(view.id),
             )
 
         try:
-            reply = await planner.reply(request.message, request.context)
+            assistant_reply = await planner.reply(request.message, context)
         except (AttributeError, ModelTimeoutError, ModelUnavailableError, ModelResponseError):
             reply = _casual_reply(request.message)
-        return ChatResponse(reply=reply, plan=None)
+            return await chat_response(request, reply)
+        return await chat_response(
+            request,
+            assistant_reply.reply,
+            assistant_reply.spoken_reply,
+        )
 
     @app.get(
         "/api/v1/control-tasks/{task_id}",
@@ -368,6 +497,14 @@ def _is_task_request(message: str) -> bool:
     return "生成计划" in text or "create plan" in text
 
 
+def _is_stop_all_command(message: str) -> bool:
+    text = message.strip().lower()
+    return any(
+        phrase in text
+        for phrase in ("全部停止", "停止全部", "关闭全部", "stop all", "disable all")
+    )
+
+
 def _direct_task_command(message: str):
     text = message.strip().lower()
     start = any(word in text for word in ("启动", "开启", "打开", "start", "enable"))
@@ -464,13 +601,22 @@ def _feature_control_task(task_name, label):
 
 
 async def _run_control_task(task_id, control, tasks, spec, cancellation):
-    def update(**values):
+    def update(force=False, **values):
+        if not force and (
+            cancellation.is_set()
+            or tasks[task_id].state is ControlTaskState.STOPPED
+        ):
+            return False
         tasks[task_id] = tasks[task_id].model_copy(update=values)
+        return True
 
     try:
         if spec["kind"] == "feature":
-            update(state=ControlTaskState.RUNNING, current_message="正在启动%s" % spec["label"])
+            if cancellation.is_set():
+                return
             start_result = await control.start_task(spec["task"])
+            if cancellation.is_set():
+                return
             next_step = 4 if spec["dependencies"] else 3
             update(completed_steps=next_step, current_message="正在确认运行状态")
             if start_result.get("status") not in {
@@ -480,10 +626,10 @@ async def _run_control_task(task_id, control, tasks, spec, cancellation):
                 "dry_run",
             } and not start_result.get("started"):
                 raise RuntimeError("target process did not start")
-            result = "已成功开启%s功能。" % spec["label"]
+            result = "%s功能正在运行。" % spec["label"]
             update(
                 completed_steps=len(tasks[task_id].steps),
-                state=ControlTaskState.COMPLETED,
+                state=ControlTaskState.RUNNING,
                 current_message=result,
                 result=result,
             )
@@ -511,7 +657,7 @@ async def _run_control_task(task_id, control, tasks, spec, cancellation):
 
         await control.move("stop")
         if cancellation.is_set():
-            update(state=ControlTaskState.STOPPED, current_message="任务已停止", result="已停止")
+            update(force=True, state=ControlTaskState.STOPPED, current_message="任务已停止", result="已停止")
         else:
             result = "已完成%s并停止。" % spec["label"]
             update(
@@ -522,6 +668,8 @@ async def _run_control_task(task_id, control, tasks, spec, cancellation):
                 result=result,
             )
     except Exception as exc:
+        if cancellation.is_set() or tasks[task_id].state is ControlTaskState.STOPPED:
+            return
         logger.warning("Control task failed", exc_info=exc)
         try:
             await control.move("stop")

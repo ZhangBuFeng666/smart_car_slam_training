@@ -9,6 +9,9 @@ import java.net.URLEncoder
 
 data class JarvisChatResponse(
     val reply: String,
+    val spokenReply: String?,
+    val speechState: String?,
+    val speechRequestId: String?,
     val plan: JarvisMissionPlan?,
     val controlTask: JarvisControlTask?
 )
@@ -31,14 +34,18 @@ class JarvisApi @JvmOverloads constructor(
 
     fun authorizationHeader(): String = "Bearer $token"
 
-    fun chat(message: String, context: JSONObject = JSONObject()): JarvisChatResponse {
+    @JvmOverloads
+    fun chat(
+        message: String,
+        context: JSONObject = JSONObject(),
+        speechEnabled: Boolean = false
+    ): JarvisChatResponse {
         val body = JSONObject()
             .put("message", message)
             .put("context", context)
+            .put("speech_enabled", speechEnabled)
         val response = request("POST", "$baseUrl/api/v1/chat", body)
-        val plan = if (response.isNull("plan")) null else JarvisJson.parsePlan(response.getJSONObject("plan"))
-        val controlTask = response.optJSONObject("control_task")?.let(JarvisJson::parseControlTask)
-        return JarvisChatResponse(response.optString("reply"), plan, controlTask)
+        return parseChatResponse(response)
     }
 
     fun getControlTask(taskId: String): JarvisControlTask =
@@ -95,6 +102,27 @@ class JarvisApi @JvmOverloads constructor(
 
     private val baseUrl: String
         get() = "http://$normalizedHost:$port"
+
+    companion object {
+        @JvmStatic
+        fun parseChatResponse(response: JSONObject): JarvisChatResponse {
+            val plan = if (response.isNull("plan")) null
+            else JarvisJson.parsePlan(response.getJSONObject("plan"))
+            val controlTask = response.optJSONObject("control_task")?.let(JarvisJson::parseControlTask)
+            val speech = response.optJSONObject("speech")
+            return JarvisChatResponse(
+                reply = response.optString("reply"),
+                spokenReply = response.optionalString("spoken_reply"),
+                speechState = speech?.optionalString("state"),
+                speechRequestId = speech?.optionalString("request_id"),
+                plan = plan,
+                controlTask = controlTask
+            )
+        }
+
+        private fun JSONObject.optionalString(key: String): String? =
+            if (has(key) && !isNull(key)) getString(key).takeIf { it.isNotBlank() } else null
+    }
 
     private fun request(method: String, url: String, body: JSONObject? = null): JSONObject =
         JSONObject(requestText(method, url, body))

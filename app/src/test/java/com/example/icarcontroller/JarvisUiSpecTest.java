@@ -21,4 +21,12 @@ public class JarvisUiSpecTest {
         assertEquals("查看报告", JarvisUiSpec.secondaryActions().get(1));
         assertEquals("急停", JarvisUiSpec.dangerAction());
     }
+
+    @Test
+    public void speechControlsUseOneHeaderToggleAndAssistantReplay() {
+        assertEquals("语音播报已开启", JarvisUiSpec.speechToggleDescription(true));
+        assertEquals("语音播报已关闭", JarvisUiSpec.speechToggleDescription(false));
+        assertTrue(JarvisUiSpec.canReplaySpeech("口语摘要"));
+        assertTrue(!JarvisUiSpec.canReplaySpeech("  "));
+    }
 }

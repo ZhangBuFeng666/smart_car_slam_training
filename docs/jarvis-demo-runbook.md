@@ -25,7 +25,7 @@ python3 server.py --container 8b98 --host 0.0.0.0 --port 8000
 Start Jarvis in the foreground:
 
 ```bash
-cd /opt/jarvis-agent
+cd /home/jetson/jarvis-agent
 .venv/bin/python -m uvicorn jarvis_agent.api:create_app --factory --host 0.0.0.0 --port 8100
 ```
 

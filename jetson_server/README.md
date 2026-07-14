@@ -65,21 +65,32 @@ Pose and goal:
 - `GET /navigation/waypoints/cancel`
 
 The waypoint endpoint requires an explicit route start. The server publishes
-that start on `/initialpose` before submitting the ordered points to Nav2
-`/follow_waypoints`. If the vendor Nav2 build has no `/follow_waypoints` action
-server, the navigation bridge automatically executes the same ordered route as
-consecutive `/navigate_to_pose` goals. Starting automatic mapping always stops the previous
+that start on `/initialpose`, then executes every ordered point as an individual
+`/navigate_to_pose` goal. After each result, the bridge verifies the live
+`map -> base_footprint` yaw three times against the requested heading with a
+10-degree tolerance. A mismatched heading is corrected by resubmitting the same
+pose once; a second mismatch stops the route instead of advancing. Starting automatic mapping always stops the previous
 Gmapping/RViz processes and resets the cached map snapshot, so a second run is
 a new SLAM session rather than a continuation of the first one.
 
 The initial pose endpoint publishes `/initialpose`.
 The goal endpoint publishes `/goal_pose`.
 The state endpoint reads `/map`, `/goal_pose`, `/plan` and `/global_plan`.
-It also reports Nav2 `FollowWaypoints` progress so Android can show the active
-point, completion and missed waypoint indexes.
+It reports the active point, navigation/alignment/verification phase, live yaw
+error, retry count, completion and missed waypoint indexes.
 Robot pose is resolved from `map` to `base_footprint`/`base_link` TF, with
 `/amcl_pose` as an additional source. Android sends its last map generation so
 unchanged map cells are not retransmitted on each poll.
+
+Apply the same explicit 10-degree Nav2 goal checker to DWA, TEB and RPP in an
+8b98 workspace before restarting navigation:
+
+```bash
+python3 patch_nav_goal_checkers.py --workspace /root/icar_ros2_ws/icar_ws
+```
+
+The patch updates both source and install parameter files, is idempotent, and
+keeps a one-time `.before-yaw-goal-checker` backup beside every modified file.
 
 The selected container must provide the normal ROS 2 Python packages used by
 the Yahboom navigation stack: `rclpy`, `nav_msgs`, `geometry_msgs`, and

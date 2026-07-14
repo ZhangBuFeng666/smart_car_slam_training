@@ -14,6 +14,9 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 class ParkingMapView @JvmOverloads constructor(
     context: Context,
@@ -75,8 +78,10 @@ class ParkingMapView @JvmOverloads constructor(
         Checkpoint("E", 0.30f, 0.76f)
     )
     private var selectedIndex = 0
+    private var selectedWaypointIndex = -1
     private var checkpointListener: ((String) -> Unit)? = null
     private var waypointListener: ((NavigationPoint?, String?) -> Unit)? = null
+    private var waypointFocusListener: ((Int, NavigationPoint?) -> Unit)? = null
     private var routeStartListener: ((NavigationPose?, String?) -> Unit)? = null
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -118,6 +123,10 @@ class ParkingMapView @JvmOverloads constructor(
         waypointListener = listener
     }
 
+    fun setOnWaypointFocusChangedListener(listener: (Int, NavigationPoint?) -> Unit) {
+        waypointFocusListener = listener
+    }
+
     fun setOnRouteStartSelectedListener(listener: (NavigationPose?, String?) -> Unit) {
         routeStartListener = listener
     }
@@ -144,25 +153,94 @@ class ParkingMapView @JvmOverloads constructor(
 
     fun routeStartPose(): NavigationPose? = routeStartPose
 
+    fun useLivePoseAsRouteStart(): NavigationPose? {
+        val pose = livePose ?: return null
+        routeStartPose = pose
+        selectedWaypoints.clear()
+        selectedWaypointIndex = -1
+        mapTouchMode = MapTouchMode.NONE
+        invalidate()
+        notifyWaypointFocusChanged()
+        routeStartListener?.invoke(routeStartPose, null)
+        return routeStartPose
+    }
+
+    fun adjustRouteStartYaw(deltaRadians: Double): NavigationPose? {
+        val start = routeStartPose ?: return null
+        val yaw = atan2(sin(start.yaw + deltaRadians), cos(start.yaw + deltaRadians))
+        routeStartPose = start.copy(yaw = yaw)
+        invalidate()
+        routeStartListener?.invoke(routeStartPose, null)
+        return routeStartPose
+    }
+
+    fun adjustSelectedWaypointYaw(deltaRadians: Double): NavigationPoint? {
+        if (selectedWaypointIndex !in selectedWaypoints.indices) return null
+        val point = selectedWaypoints[selectedWaypointIndex]
+        val currentYaw = effectiveWaypointYaw(selectedWaypointIndex)
+        val yaw = atan2(sin(currentYaw + deltaRadians), cos(currentYaw + deltaRadians))
+        val adjusted = point.copy(yaw = yaw, hasExplicitYaw = true)
+        selectedWaypoints[selectedWaypointIndex] = adjusted
+        invalidate()
+        waypointFocusListener?.invoke(selectedWaypointIndex, adjusted)
+        return adjusted
+    }
+
     fun undoWaypoint(): Int {
         if (selectedWaypoints.isNotEmpty()) selectedWaypoints.removeAt(selectedWaypoints.lastIndex)
+        selectedWaypointIndex = selectedWaypoints.lastIndex
         invalidate()
+        notifyWaypointFocusChanged()
         return selectedWaypoints.size
     }
 
     fun clearWaypoints(): Int {
         selectedWaypoints.clear()
+        selectedWaypointIndex = -1
         routeStartPose = null
         invalidate()
+        notifyWaypointFocusChanged()
         return 0
     }
 
     fun appendReturnToStart(): Boolean {
         val start = routeStartPose ?: return false
-        selectedWaypoints += NavigationPoint(start.x, start.y)
+        selectedWaypoints += NavigationPoint(start.x, start.y, start.yaw, hasExplicitYaw = true)
+        selectedWaypointIndex = selectedWaypoints.lastIndex
         invalidate()
         waypointListener?.invoke(selectedWaypoints.last(), null)
+        notifyWaypointFocusChanged()
         return true
+    }
+
+    private fun effectiveWaypointYaw(index: Int): Double {
+        val point = selectedWaypoints[index]
+        if (point.hasExplicitYaw) return point.yaw
+        return when {
+            index < selectedWaypoints.lastIndex -> {
+                val next = selectedWaypoints[index + 1]
+                atan2(next.y - point.y, next.x - point.x)
+            }
+            index > 0 -> {
+                val previous = selectedWaypoints[index - 1]
+                atan2(point.y - previous.y, point.x - previous.x)
+            }
+            routeStartPose != null -> {
+                val start = routeStartPose!!
+                atan2(point.y - start.y, point.x - start.x)
+            }
+            else -> 0.0
+        }
+    }
+
+    private fun notifyWaypointFocusChanged() {
+        val focused = selectedWaypoints.getOrNull(selectedWaypointIndex)?.let { point ->
+            point.copy(yaw = effectiveWaypointYaw(selectedWaypointIndex))
+        }
+        waypointFocusListener?.invoke(
+            selectedWaypointIndex,
+            focused
+        )
     }
 
     fun zoomIn() = setMapZoom(mapZoom * 1.35f)
@@ -215,7 +293,9 @@ class ParkingMapView @JvmOverloads constructor(
             liveGoal = null
             livePath = emptyList()
             selectedWaypoints.clear()
+            selectedWaypointIndex = -1
             routeStartPose = null
+            notifyWaypointFocusChanged()
             resetMapViewport()
         }
         snapshot.map?.let { map ->
@@ -322,6 +402,15 @@ class ParkingMapView @JvmOverloads constructor(
             if (selectedWaypoints.isNotEmpty()) canvas.drawPath(selectedRoute, waypointRoutePaint)
             routeStartPose?.let { start ->
                 val screen = worldToScreen(start.x, start.y, map, destination)
+                val angle = start.yaw - map.origin.yaw
+                val headingLength = dp(25f)
+                canvas.drawLine(
+                    screen.first,
+                    screen.second,
+                    screen.first + cos(angle).toFloat() * headingLength,
+                    screen.second - sin(angle).toFloat() * headingLength,
+                    routePaint
+                )
                 canvas.drawCircle(screen.first, screen.second, dp(12f), robotPaint)
                 canvas.drawCircle(screen.first, screen.second, dp(12f), checkpointStrokePaint)
                 canvas.drawText(
@@ -333,6 +422,11 @@ class ParkingMapView @JvmOverloads constructor(
             }
             selectedWaypoints.forEachIndexed { index, point ->
                 val screen = worldToScreen(point.x, point.y, map, destination)
+                val angle = effectiveWaypointYaw(index) - map.origin.yaw
+                drawHeadingIndicator(canvas, screen.first, screen.second, angle, dp(22f))
+                if (index == selectedWaypointIndex) {
+                    canvas.drawCircle(screen.first, screen.second, dp(15f), routePaint)
+                }
                 canvas.drawCircle(screen.first, screen.second, dp(11f), checkpointPaint)
                 canvas.drawCircle(screen.first, screen.second, dp(11f), checkpointStrokePaint)
                 val label = (index + 1).toString()
@@ -378,6 +472,28 @@ class ParkingMapView @JvmOverloads constructor(
             canvas.restore()
         }
         canvas.drawText("ROS MAP · LIVE", inset, height - dp(10f), mutedTextPaint)
+    }
+
+    private fun drawHeadingIndicator(
+        canvas: Canvas,
+        centerX: Float,
+        centerY: Float,
+        angle: Double,
+        length: Float
+    ) {
+        val endX = centerX + cos(angle).toFloat() * length
+        val endY = centerY - sin(angle).toFloat() * length
+        canvas.drawLine(centerX, centerY, endX, endY, routePaint)
+        val wingLength = length * 0.34f
+        listOf(angle + Math.PI - 0.55, angle + Math.PI + 0.55).forEach { wingAngle ->
+            canvas.drawLine(
+                endX,
+                endY,
+                endX + cos(wingAngle).toFloat() * wingLength,
+                endY - sin(wingAngle).toFloat() * wingLength,
+                routePaint
+            )
+        }
     }
 
     private fun worldToScreen(
@@ -503,9 +619,31 @@ class ParkingMapView @JvmOverloads constructor(
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> touchMoved = true
             }
-            val selecting = mapTouchMode != MapTouchMode.NONE
-            if (event.actionMasked == MotionEvent.ACTION_UP && selecting && !touchMoved && !scaleGestureActive) {
+            val cleanTap = event.actionMasked == MotionEvent.ACTION_UP && !touchMoved && !scaleGestureActive
+            if (cleanTap) {
                 val destination = liveMapDestination(map)
+                val tappedWaypoint = if (mapTouchMode != MapTouchMode.START) {
+                    selectedWaypoints.indices.minByOrNull { index ->
+                        val point = selectedWaypoints[index]
+                        val screen = worldToScreen(point.x, point.y, map, destination)
+                        hypot(event.x - screen.first, event.y - screen.second)
+                    }?.takeIf { index ->
+                        val point = selectedWaypoints[index]
+                        val screen = worldToScreen(point.x, point.y, map, destination)
+                        hypot(event.x - screen.first, event.y - screen.second) <= dp(22f)
+                    }
+                } else null
+                if (tappedWaypoint != null) {
+                    selectedWaypointIndex = tappedWaypoint
+                    invalidate()
+                    notifyWaypointFocusChanged()
+                    super.performClick()
+                    return true
+                }
+                if (mapTouchMode == MapTouchMode.NONE) {
+                    super.performClick()
+                    return true
+                }
                 if (!destination.contains(event.x, event.y)) {
                     notifyMapSelectionError("请点击地图范围内的空闲区域")
                     return true
@@ -523,11 +661,15 @@ class ParkingMapView @JvmOverloads constructor(
                 if (mapTouchMode == MapTouchMode.START) {
                     routeStartPose = NavigationPose(point.x, point.y, 0.0)
                     selectedWaypoints.clear()
+                    selectedWaypointIndex = -1
                     mapTouchMode = MapTouchMode.NONE
+                    notifyWaypointFocusChanged()
                     routeStartListener?.invoke(routeStartPose, null)
                 } else {
                     selectedWaypoints += point
+                    selectedWaypointIndex = selectedWaypoints.lastIndex
                     waypointListener?.invoke(point, null)
+                    notifyWaypointFocusChanged()
                 }
                 invalidate()
                 super.performClick()

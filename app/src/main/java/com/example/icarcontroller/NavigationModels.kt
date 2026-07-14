@@ -2,7 +2,12 @@ package com.example.icarcontroller
 
 import org.json.JSONObject
 
-data class NavigationPoint(val x: Double, val y: Double)
+data class NavigationPoint(
+    val x: Double,
+    val y: Double,
+    val yaw: Double = 0.0,
+    val hasExplicitYaw: Boolean = false
+)
 
 data class NavigationPose(val x: Double, val y: Double, val yaw: Double)
 
@@ -11,7 +16,12 @@ data class NavigationWaypointStatus(
     val total: Int,
     val currentIndex: Int,
     val missed: List<Int>,
-    val message: String
+    val message: String,
+    val phase: String = "",
+    val targetYaw: Double? = null,
+    val actualYaw: Double? = null,
+    val yawErrorDegrees: Double? = null,
+    val retryCount: Int = 0
 )
 
 data class NavigationMapData(
@@ -60,7 +70,12 @@ object NavigationSnapshotParser {
                     missed = status.optJSONArray("missed")?.let { array ->
                         (0 until array.length()).map(array::getInt)
                     }.orEmpty(),
-                    message = status.optString("message", "")
+                    message = status.optString("message", ""),
+                    phase = status.optString("phase", ""),
+                    targetYaw = status.optionalDouble("target_yaw"),
+                    actualYaw = status.optionalDouble("actual_yaw"),
+                    yawErrorDegrees = status.optionalDouble("yaw_error_deg"),
+                    retryCount = status.optInt("retry_count", 0)
                 )
             } ?: NavigationWaypointStatus("idle", 0, -1, emptyList(), "")
         )
@@ -100,4 +115,7 @@ object NavigationSnapshotParser {
         y = obj.getDouble("y"),
         yaw = obj.optDouble("yaw", 0.0)
     )
+
+    private fun JSONObject.optionalDouble(name: String): Double? =
+        if (has(name) && !isNull(name)) optDouble(name).takeIf(Double::isFinite) else null
 }

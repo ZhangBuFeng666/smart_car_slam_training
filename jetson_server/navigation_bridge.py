@@ -10,6 +10,46 @@ import threading
 import time
 
 
+WAYPOINT_YAW_TOLERANCE_RAD = math.radians(10.0)
+WAYPOINT_YAW_REQUIRED_SAMPLES = 3
+WAYPOINT_YAW_VERIFICATION_TIMEOUT_SEC = 2.0
+WAYPOINT_YAW_MAX_CORRECTIONS = 1
+
+
+def normalize_angle(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def waypoint_yaw_error(target_yaw, actual_yaw):
+    return normalize_angle(float(target_yaw) - float(actual_yaw))
+
+
+class YawStabilityTracker:
+    def __init__(
+        self,
+        target_yaw,
+        tolerance=WAYPOINT_YAW_TOLERANCE_RAD,
+        required_samples=WAYPOINT_YAW_REQUIRED_SAMPLES,
+    ):
+        self.target_yaw = float(target_yaw)
+        self.tolerance = float(tolerance)
+        self.required_samples = int(required_samples)
+        self.samples = 0
+        self.consecutive_matches = 0
+        self.last_actual_yaw = None
+        self.last_error = None
+
+    def observe(self, actual_yaw):
+        self.samples += 1
+        self.last_actual_yaw = float(actual_yaw)
+        self.last_error = waypoint_yaw_error(self.target_yaw, actual_yaw)
+        if abs(self.last_error) <= self.tolerance:
+            self.consecutive_matches += 1
+        else:
+            self.consecutive_matches = 0
+        return self.consecutive_matches >= self.required_samples
+
+
 def quaternion_to_yaw(x, y, z, w):
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
@@ -44,8 +84,9 @@ def downsample_points(points, limit=240):
 
 
 def select_waypoint_backend(follow_waypoints_ready, navigate_to_pose_ready):
-    if follow_waypoints_ready:
-        return "follow_waypoints"
+    # Multi-point routes must pause between goals so the bridge can verify the
+    # robot's real heading before advancing. FollowWaypoints can move to the
+    # next pose before that verification is possible.
     if navigate_to_pose_ready:
         return "navigate_to_pose"
     return None
@@ -66,6 +107,11 @@ class NavigationSnapshotStore:
             "missed": [],
             "message": "",
             "backend": "",
+            "phase": "idle",
+            "target_yaw": None,
+            "actual_yaw": None,
+            "yaw_error_deg": None,
+            "retry_count": 0,
         }
         self.updated_at = None
 
@@ -117,6 +163,11 @@ class NavigationSnapshotStore:
         missed=None,
         message=None,
         backend=None,
+        phase=None,
+        target_yaw=None,
+        actual_yaw=None,
+        yaw_error_deg=None,
+        retry_count=None,
     ):
         self.waypoints["state"] = str(state)
         if total is not None:
@@ -129,6 +180,16 @@ class NavigationSnapshotStore:
             self.waypoints["message"] = str(message)
         if backend is not None:
             self.waypoints["backend"] = str(backend)
+        if phase is not None:
+            self.waypoints["phase"] = str(phase)
+        if target_yaw is not None:
+            self.waypoints["target_yaw"] = float(target_yaw)
+        if actual_yaw is not None:
+            self.waypoints["actual_yaw"] = float(actual_yaw)
+        if yaw_error_deg is not None:
+            self.waypoints["yaw_error_deg"] = float(yaw_error_deg)
+        if retry_count is not None:
+            self.waypoints["retry_count"] = int(retry_count)
         self.updated_at = self.clock()
 
     def snapshot(self, known_map_generation=-1):
@@ -157,7 +218,7 @@ class NavigationSnapshotStore:
 def main():
     import rclpy
     from action_msgs.msg import GoalStatus
-    from nav2_msgs.action import FollowWaypoints, NavigateToPose
+    from nav2_msgs.action import NavigateToPose
     from rclpy.action import ActionClient
     from rclpy.time import Time
     from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
@@ -172,12 +233,13 @@ def main():
     tf_buffer = Buffer()
     tf_listener = TransformListener(tf_buffer, node)
     last_tf_lookup = 0.0
-    waypoint_client = ActionClient(node, FollowWaypoints, "/follow_waypoints")
     navigate_client = ActionClient(node, NavigateToPose, "/navigate_to_pose")
     waypoint_goal_handle = None
     pending_waypoint_submission = None
     sequential_points = []
     sequential_index = -1
+    sequential_correction_count = 0
+    orientation_verification = None
     initial_pose_publisher = node.create_publisher(
         PoseWithCovarianceStamped, "/initialpose", 10
     )
@@ -238,162 +300,179 @@ def main():
     node.create_subscription(Path, "/plan", path_callback, 10)
     node.create_subscription(Path, "/global_plan", path_callback, 10)
 
-    def waypoint_feedback(feedback_message):
-        store.set_waypoint_status(
-            "active",
-            current_index=feedback_message.feedback.current_waypoint,
-            message="巡逻执行中",
-            backend="follow_waypoints",
-        )
-
-    def waypoint_result_done(future):
-        nonlocal waypoint_goal_handle
-        try:
-            wrapped = future.result()
-            missed = list(getattr(wrapped.result, "missed_waypoints", []))
-            if wrapped.status == GoalStatus.STATUS_SUCCEEDED and not missed:
-                state = "completed"
-                message = "全部目标点已完成"
-            elif wrapped.status == GoalStatus.STATUS_CANCELED:
-                state = "canceled"
-                message = "多点导航已取消"
-            else:
-                state = "failed"
-                message = "部分目标点未完成" if missed else "多点导航失败"
-            store.set_waypoint_status(state, missed=missed, message=message)
-        except Exception as error:
-            store.set_waypoint_status("failed", message=str(error))
-        waypoint_goal_handle = None
-
-    def waypoint_goal_response(future):
-        nonlocal waypoint_goal_handle
-        try:
-            goal_handle = future.result()
-            if not goal_handle.accepted:
-                store.set_waypoint_status("rejected", message="Nav2 拒绝多点任务")
-                return
-            waypoint_goal_handle = goal_handle
-            store.set_waypoint_status("active", current_index=0, message="巡逻执行中")
-            goal_handle.get_result_async().add_done_callback(waypoint_result_done)
-        except Exception as error:
-            store.set_waypoint_status("failed", message=str(error))
-
     def submit_waypoints(points):
-        if store.waypoints["state"] in ("submitting", "active", "canceling"):
+        if store.waypoints["state"] in (
+            "submitting", "active", "aligning", "verifying", "retrying", "canceling"
+        ):
             raise ValueError("a waypoint mission is already active")
-        backend = select_waypoint_backend(
-            waypoint_client.wait_for_server(timeout_sec=0.3),
-            navigate_client.wait_for_server(timeout_sec=1.5),
-        )
-        if backend == "navigate_to_pose":
-            start_sequential_navigation(points)
-            return
-        if backend is None:
-            raise RuntimeError(
-                "Nav2 /follow_waypoints and /navigate_to_pose actions are unavailable"
-            )
-        goal = FollowWaypoints.Goal()
-        now = node.get_clock().now().to_msg()
-        for point in points:
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = now
-            pose.pose.position.x = float(point["x"])
-            pose.pose.position.y = float(point["y"])
-            yaw = float(point.get("yaw", 0.0))
-            pose.pose.orientation.z = math.sin(yaw / 2.0)
-            pose.pose.orientation.w = math.cos(yaw / 2.0)
-            goal.poses.append(pose)
+        if select_waypoint_backend(False, navigate_client.wait_for_server(timeout_sec=1.5)) is None:
+            raise RuntimeError("Nav2 /navigate_to_pose action is unavailable")
+        start_sequential_navigation(points)
+
+    def localization_is_ready():
+        for base_frame in ("base_footprint", "base_link"):
+            try:
+                tf_buffer.lookup_transform("map", base_frame, Time())
+                return True
+            except Exception:
+                continue
+        return False
+
+    def fail_sequential(state, message):
+        nonlocal waypoint_goal_handle, sequential_index, sequential_points
+        nonlocal sequential_correction_count, orientation_verification
+        missed = list(range(max(0, sequential_index), len(sequential_points)))
+        waypoint_goal_handle = None
+        sequential_points = []
+        sequential_index = -1
+        sequential_correction_count = 0
+        orientation_verification = None
         store.set_waypoint_status(
-            "submitting",
-            total=len(points),
-            current_index=0,
-            missed=[],
-            message="正在提交多点任务",
-            backend="follow_waypoints",
+            state,
+            missed=missed,
+            message=message,
+            backend="navigate_to_pose",
+            phase="failed",
         )
-        waypoint_client.send_goal_async(
-            goal,
-            feedback_callback=waypoint_feedback,
-        ).add_done_callback(waypoint_goal_response)
+
+    def advance_after_orientation_verified():
+        nonlocal waypoint_goal_handle, sequential_index, sequential_points
+        nonlocal sequential_correction_count, orientation_verification
+        next_index = sequential_index + 1
+        waypoint_goal_handle = None
+        orientation_verification = None
+        sequential_correction_count = 0
+        if next_index < len(sequential_points):
+            send_sequential_goal(next_index)
+            return
+        total = len(sequential_points)
+        sequential_points = []
+        sequential_index = -1
+        store.set_waypoint_status(
+            "completed",
+            current_index=max(0, total - 1),
+            message="全部目标点的位置与方向均已完成",
+            backend="navigate_to_pose",
+            phase="completed",
+            retry_count=0,
+        )
+
+    def retry_orientation_or_fail(reason):
+        nonlocal sequential_correction_count, orientation_verification
+        if sequential_correction_count < WAYPOINT_YAW_MAX_CORRECTIONS:
+            sequential_correction_count += 1
+            orientation_verification = None
+            store.set_waypoint_status(
+                "retrying",
+                current_index=sequential_index,
+                message=f"第 {sequential_index + 1} 个目标点方向未对准，正在校正",
+                backend="navigate_to_pose",
+                phase="retrying",
+                retry_count=sequential_correction_count,
+            )
+            send_sequential_goal(sequential_index)
+            return
+        fail_sequential(
+            "failed",
+            f"第 {sequential_index + 1} 个目标点方向校正失败：{reason}",
+        )
+
+    def begin_orientation_verification():
+        nonlocal orientation_verification
+        point = sequential_points[sequential_index]
+        target_yaw = float(point.get("yaw", 0.0))
+        orientation_verification = {
+            "tracker": YawStabilityTracker(target_yaw),
+            "deadline": time.monotonic() + WAYPOINT_YAW_VERIFICATION_TIMEOUT_SEC,
+        }
+        store.set_waypoint_status(
+            "verifying",
+            current_index=sequential_index,
+            message=f"第 {sequential_index + 1} 个目标点位置已到达，正在确认方向",
+            backend="navigate_to_pose",
+            phase="verifying",
+            target_yaw=target_yaw,
+            retry_count=sequential_correction_count,
+        )
+
+    def observe_orientation(actual_yaw):
+        verification = orientation_verification
+        if verification is None:
+            return
+        tracker = verification["tracker"]
+        verified = tracker.observe(actual_yaw)
+        error_degrees = math.degrees(tracker.last_error)
+        store.set_waypoint_status(
+            "verifying",
+            current_index=sequential_index,
+            message=(
+                f"第 {sequential_index + 1} 个目标点方向已对准，正在稳定确认"
+                if abs(tracker.last_error) <= tracker.tolerance
+                else f"第 {sequential_index + 1} 个目标点方向还差 {abs(error_degrees):.1f}°"
+            ),
+            backend="navigate_to_pose",
+            phase="verifying",
+            target_yaw=tracker.target_yaw,
+            actual_yaw=actual_yaw,
+            yaw_error_deg=error_degrees,
+            retry_count=sequential_correction_count,
+        )
+        if verified:
+            advance_after_orientation_verified()
+        elif (
+            tracker.samples >= WAYPOINT_YAW_REQUIRED_SAMPLES
+            and tracker.consecutive_matches == 0
+        ):
+            retry_orientation_or_fail(f"仍相差 {abs(error_degrees):.1f}°")
+
+    def check_orientation_verification_timeout(now):
+        verification = orientation_verification
+        if verification is None or now < verification["deadline"]:
+            return
+        tracker = verification["tracker"]
+        if tracker.last_error is None:
+            retry_orientation_or_fail("无法读取小车实时方向")
+        else:
+            retry_orientation_or_fail(f"仍相差 {abs(math.degrees(tracker.last_error)):.1f}°")
 
     def sequential_result_done(future):
-        nonlocal waypoint_goal_handle, sequential_index, sequential_points
+        nonlocal waypoint_goal_handle
         try:
             wrapped = future.result()
             if wrapped.status == GoalStatus.STATUS_SUCCEEDED:
-                next_index = sequential_index + 1
                 waypoint_goal_handle = None
-                if next_index < len(sequential_points):
-                    send_sequential_goal(next_index)
-                else:
-                    total = len(sequential_points)
-                    sequential_points = []
-                    sequential_index = -1
-                    store.set_waypoint_status(
-                        "completed",
-                        current_index=max(0, total - 1),
-                        message="全部目标点已完成",
-                        backend="navigate_to_pose",
-                    )
+                begin_orientation_verification()
             elif wrapped.status == GoalStatus.STATUS_CANCELED:
-                sequential_points = []
-                sequential_index = -1
-                waypoint_goal_handle = None
-                store.set_waypoint_status(
-                    "canceled",
-                    message="多点导航已取消",
-                    backend="navigate_to_pose",
-                )
+                fail_sequential("canceled", "多点导航已取消")
             else:
-                missed = list(range(max(0, sequential_index), len(sequential_points)))
-                sequential_points = []
-                sequential_index = -1
-                waypoint_goal_handle = None
-                store.set_waypoint_status(
-                    "failed",
-                    missed=missed,
-                    message="当前目标点导航失败",
-                    backend="navigate_to_pose",
-                )
+                fail_sequential("failed", "当前目标点导航失败")
         except Exception as error:
-            waypoint_goal_handle = None
-            sequential_points = []
-            sequential_index = -1
-            store.set_waypoint_status(
-                "failed", message=str(error), backend="navigate_to_pose"
-            )
+            fail_sequential("failed", str(error))
 
     def sequential_goal_response(future):
-        nonlocal waypoint_goal_handle, sequential_points, sequential_index
+        nonlocal waypoint_goal_handle
         try:
             goal_handle = future.result()
             if not goal_handle.accepted:
-                missed = list(range(max(0, sequential_index), len(sequential_points)))
-                sequential_points = []
-                sequential_index = -1
-                store.set_waypoint_status(
-                    "rejected",
-                    missed=missed,
-                    message="Nav2 拒绝当前目标点",
-                    backend="navigate_to_pose",
-                )
+                fail_sequential("rejected", "Nav2 拒绝当前目标点")
                 return
             waypoint_goal_handle = goal_handle
+            correcting = sequential_correction_count > 0
             store.set_waypoint_status(
-                "active",
+                "aligning" if correcting else "active",
                 current_index=sequential_index,
-                message="按顺序执行目标点",
+                message=(
+                    f"正在校正第 {sequential_index + 1} 个目标点方向"
+                    if correcting
+                    else f"正在前往第 {sequential_index + 1} 个目标点"
+                ),
                 backend="navigate_to_pose",
+                phase="aligning" if correcting else "navigating",
+                retry_count=sequential_correction_count,
             )
             goal_handle.get_result_async().add_done_callback(sequential_result_done)
         except Exception as error:
-            waypoint_goal_handle = None
-            sequential_points = []
-            sequential_index = -1
-            store.set_waypoint_status(
-                "failed", message=str(error), backend="navigate_to_pose"
-            )
+            fail_sequential("failed", str(error))
 
     def send_sequential_goal(index):
         nonlocal sequential_index
@@ -410,29 +489,42 @@ def main():
         store.set_waypoint_status(
             "submitting",
             current_index=index,
-            message=f"正在提交第 {index + 1} 个目标点",
+            message=(
+                f"正在提交第 {index + 1} 个目标点方向校正"
+                if sequential_correction_count > 0
+                else f"正在提交第 {index + 1} 个目标点"
+            ),
             backend="navigate_to_pose",
+            phase="submitting",
+            target_yaw=yaw,
+            retry_count=sequential_correction_count,
         )
         navigate_client.send_goal_async(goal).add_done_callback(sequential_goal_response)
 
     def start_sequential_navigation(points):
-        nonlocal sequential_points, sequential_index
+        nonlocal sequential_points, sequential_index, sequential_correction_count
+        nonlocal orientation_verification
         sequential_points = list(points)
         sequential_index = -1
+        sequential_correction_count = 0
+        orientation_verification = None
         store.set_waypoint_status(
             "submitting",
             total=len(sequential_points),
             current_index=0,
             missed=[],
-            message="Waypoint Follower 不可用，切换为顺序目标导航",
+            message="使用逐点导航并校验每个目标点方向",
             backend="navigate_to_pose",
+            phase="submitting",
+            retry_count=0,
         )
         send_sequential_goal(0)
 
     def queue_waypoints(start, points):
         nonlocal pending_waypoint_submission
         if store.waypoints["state"] in (
-            "preparing", "submitting", "active", "canceling"
+            "preparing", "submitting", "active", "aligning", "verifying",
+            "retrying", "canceling"
         ):
             raise ValueError("a waypoint mission is already active")
         pose = PoseWithCovarianceStamped()
@@ -454,23 +546,36 @@ def main():
             missed=[],
             message="起点与目标点已提交，正在等待导航算法",
         )
-        pending_waypoint_submission = (time.monotonic() + 0.6, list(points))
+        now = time.monotonic()
+        # AMCL needs the initial pose before Nav2 can finish activating its
+        # planner and navigator action servers.  On the Jetson this normally
+        # takes a couple of seconds, so do not fail the mission after a single
+        # early discovery check.
+        pending_waypoint_submission = (now + 0.6, now + 15.0, list(points))
 
     def cancel_waypoints():
         nonlocal pending_waypoint_submission, sequential_points, sequential_index
+        nonlocal sequential_correction_count, orientation_verification
         if pending_waypoint_submission is not None:
             pending_waypoint_submission = None
             store.set_waypoint_status(
                 "canceled", current_index=-1, message="待执行多点任务已取消"
             )
             return
-        if waypoint_goal_handle is None:
+        if waypoint_goal_handle is None and not sequential_points and orientation_verification is None:
             store.set_waypoint_status("idle", current_index=-1, message="当前没有多点任务")
             return
         sequential_points = []
         sequential_index = -1
+        sequential_correction_count = 0
+        orientation_verification = None
         store.set_waypoint_status("canceling", message="正在取消多点任务")
-        waypoint_goal_handle.cancel_goal_async()
+        if waypoint_goal_handle is not None:
+            waypoint_goal_handle.cancel_goal_async()
+        else:
+            store.set_waypoint_status(
+                "canceled", current_index=-1, message="多点导航已取消", phase="canceled"
+            )
 
     def request_stop(_signum, _frame):
         stopping.set()
@@ -483,12 +588,37 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.0)
             now = time.monotonic()
             if pending_waypoint_submission is not None and now >= pending_waypoint_submission[0]:
-                _, points = pending_waypoint_submission
-                pending_waypoint_submission = None
-                try:
-                    submit_waypoints(points)
-                except Exception as error:
-                    store.set_waypoint_status("failed", message=str(error))
+                _, deadline, points = pending_waypoint_submission
+                actions_ready = navigate_client.wait_for_server(timeout_sec=0.05)
+                localization_ready = localization_is_ready()
+                if (not actions_ready or not localization_ready) and now < deadline:
+                    pending_waypoint_submission = (now + 0.5, deadline, points)
+                    store.set_waypoint_status(
+                        "preparing",
+                        message=(
+                            "正在等待 Nav2 定位完成"
+                            if not localization_ready
+                            else "正在等待 Nav2 导航服务就绪"
+                        ),
+                    )
+                elif not localization_ready:
+                    pending_waypoint_submission = None
+                    store.set_waypoint_status(
+                        "failed",
+                        message="Nav2 定位未就绪，请确认起点位于地图空闲区域",
+                    )
+                elif not actions_ready:
+                    pending_waypoint_submission = None
+                    store.set_waypoint_status(
+                        "failed",
+                        message="Nav2 导航服务启动超时",
+                    )
+                else:
+                    pending_waypoint_submission = None
+                    try:
+                        submit_waypoints(points)
+                    except Exception as error:
+                        store.set_waypoint_status("failed", message=str(error))
             if now - last_tf_lookup >= 0.2:
                 last_tf_lookup = now
                 for base_frame in ("base_footprint", "base_link"):
@@ -503,7 +633,9 @@ def main():
                         translation.y,
                         quaternion_to_yaw(rotation.x, rotation.y, rotation.z, rotation.w),
                     )
+                    observe_orientation(store.pose["yaw"])
                     break
+            check_orientation_verification_timeout(now)
             readable, _, _ = select.select([sys.stdin], [], [], 0.03)
             if not readable:
                 continue
@@ -555,7 +687,6 @@ def main():
             sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
             sys.stdout.flush()
     finally:
-        waypoint_client.destroy()
         navigate_client.destroy()
         del tf_listener
         node.destroy_node()

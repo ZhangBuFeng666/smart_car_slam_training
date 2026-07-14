@@ -18,8 +18,10 @@ public class NavigationSnapshotParserTest {
                         "\"pose\":{\"x\":1.2,\"y\":2.3,\"yaw\":0.4}," +
                         "\"goal\":{\"x\":4,\"y\":5,\"yaw\":1.57}," +
                         "\"path\":[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]," +
-                        "\"waypoints\":{\"state\":\"active\",\"total\":4,\"current_index\":1," +
-                        "\"missed\":[],\"message\":\"巡逻执行中\"}}"
+                        "\"waypoints\":{\"state\":\"verifying\",\"total\":4,\"current_index\":1," +
+                        "\"missed\":[],\"message\":\"正在确认方向\",\"phase\":\"verifying\"," +
+                        "\"target_yaw\":1.0,\"actual_yaw\":0.8,\"yaw_error_deg\":11.46," +
+                        "\"retry_count\":1}}"
         );
 
         assertEquals(3L, snapshot.getMapGeneration());
@@ -30,9 +32,14 @@ public class NavigationSnapshotParserTest {
         assertEquals(1.2, snapshot.getPose().getX(), 0.0001);
         assertEquals(4.0, snapshot.getGoal().getX(), 0.0001);
         assertEquals(2, snapshot.getPath().size());
-        assertEquals("active", snapshot.getWaypoints().getState());
+        assertEquals("verifying", snapshot.getWaypoints().getState());
         assertEquals(4, snapshot.getWaypoints().getTotal());
         assertEquals(1, snapshot.getWaypoints().getCurrentIndex());
+        assertEquals("verifying", snapshot.getWaypoints().getPhase());
+        assertEquals(1.0, snapshot.getWaypoints().getTargetYaw(), 0.0001);
+        assertEquals(0.8, snapshot.getWaypoints().getActualYaw(), 0.0001);
+        assertEquals(11.46, snapshot.getWaypoints().getYawErrorDegrees(), 0.0001);
+        assertEquals(1, snapshot.getWaypoints().getRetryCount());
     }
 
     @Test

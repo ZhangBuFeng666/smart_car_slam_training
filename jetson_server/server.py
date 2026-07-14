@@ -1025,7 +1025,10 @@ def stop_task_batch(tasks):
         "while read pid; do ps -o pgid= -p \"$pid\"; done | tr -d ' ' | sort -u); "
         "for pgid in $pgids; do kill -KILL -- -$pgid 2>/dev/null || true; done; true"
     )
-    result = run_once(stop_script, timeout=2)
+    # Sourcing both ROS workspaces on the Jetson can already take more than
+    # two seconds. Allow the staged INT/TERM/KILL cleanup to finish so callers
+    # do not receive a false timeout after the processes were actually stopped.
+    result = run_once(stop_script, timeout=8)
     results = []
     for task in ordered:
         process = RUNNING.get(task)

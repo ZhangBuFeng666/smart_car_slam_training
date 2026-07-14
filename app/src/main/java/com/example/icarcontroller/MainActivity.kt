@@ -2005,6 +2005,18 @@ class MainActivity : Activity() {
         layoutParams = matchWrapParams(bottom = 12)
         lateinit var startButton: Button
         lateinit var waypointButton: Button
+        val startHeadingText = TextView(this@MainActivity).apply {
+            text = "起点方向：未设置"
+            setTextColor(color(palette.textSecondary))
+            textSize = 11f
+            gravity = Gravity.CENTER
+        }
+        val targetHeadingText = TextView(this@MainActivity).apply {
+            text = "目标点方向：未选择"
+            setTextColor(color(palette.textSecondary))
+            textSize = 11f
+            gravity = Gravity.CENTER
+        }
         val map = ParkingMapView(this@MainActivity).apply {
             setPalette(palette)
             elevation = dp(3).toFloat()
@@ -2021,12 +2033,22 @@ class MainActivity : Activity() {
                     parkingWaypointStatusText?.text = "已选择 $count 个点 · 按编号顺序执行"
                 }
             }
+            setOnWaypointFocusChangedListener { index, point ->
+                targetHeadingText.text = if (index >= 0 && point != null) {
+                    val heading = Math.toDegrees(point.yaw)
+                    "目标点 ${index + 1} 方向：${"%.0f".format(Locale.US, heading)}°"
+                } else {
+                    "目标点方向：未选择"
+                }
+            }
             setOnRouteStartSelectedListener { start, error ->
                 if (error != null) {
                     setStatus(error)
                 } else if (start != null) {
-                    setStatus("已设置路线起点：${"%.2f".format(Locale.US, start.x)}, ${"%.2f".format(Locale.US, start.y)}")
-                    parkingWaypointStatusText?.text = "起点 S 已设置 · 请继续添加目标点"
+                    val heading = Math.toDegrees(start.yaw)
+                    setStatus("路线起点：${"%.2f".format(Locale.US, start.x)}, ${"%.2f".format(Locale.US, start.y)} · ${"%.0f".format(Locale.US, heading)}°")
+                    parkingWaypointStatusText?.text = "起点 S 已设置 · 调整方向后添加目标点"
+                    startHeadingText.text = "起点方向：${"%.0f".format(Locale.US, heading)}°"
                     startButton.text = "设置起点"
                     waypointButton.text = "添加目标点"
                 }
@@ -2088,6 +2110,54 @@ class MainActivity : Activity() {
         }
         addView(modeRow, matchWrapParams(top = 9))
 
+        addView(parkingOutlineButton("使用小车当前位姿") {
+            val pose = map.useLivePoseAsRouteStart()
+            if (pose == null) {
+                setStatus("尚未获得小车实时位姿，请等待地图定位完成")
+            } else {
+                appendLog(
+                    "使用小车当前位姿作为起点：" +
+                        "${"%.2f".format(Locale.US, pose.x)}, " +
+                        "${"%.2f".format(Locale.US, pose.y)}, " +
+                        "${"%.0f".format(Locale.US, Math.toDegrees(pose.yaw))}°"
+                )
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)).apply {
+            setMargins(0, dp(7), 0, 0)
+        })
+
+        addView(startHeadingText, matchWrapParams(top = 9))
+        val headingRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("↶ 左转 15°") {
+                if (map.adjustRouteStartYaw(Math.toRadians(15.0)) == null) {
+                    setStatus("请先在地图上设置路线起点 S")
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(parkingOutlineButton("右转 15° ↷") {
+                if (map.adjustRouteStartYaw(Math.toRadians(-15.0)) == null) {
+                    setStatus("请先在地图上设置路线起点 S")
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+        }
+        addView(headingRow, matchWrapParams(top = 7))
+
+        addView(targetHeadingText, matchWrapParams(top = 9))
+        val targetHeadingRow = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(parkingOutlineButton("↶ 目标左转 15°") {
+                if (map.adjustSelectedWaypointYaw(Math.toRadians(15.0)) == null) {
+                    setStatus("请先添加目标点，或点击地图中的目标点编号")
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(parkingOutlineButton("目标右转 15° ↷") {
+                if (map.adjustSelectedWaypointYaw(Math.toRadians(-15.0)) == null) {
+                    setStatus("请先添加目标点，或点击地图中的目标点编号")
+                }
+            }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
+        }
+        addView(targetHeadingRow, matchWrapParams(top = 7))
+
         val editRow = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(parkingOutlineButton("撤销") {
@@ -2098,6 +2168,8 @@ class MainActivity : Activity() {
                 map.clearWaypoints()
                 startButton.text = "设置起点"
                 waypointButton.text = "添加目标点"
+                startHeadingText.text = "起点方向：未设置"
+                targetHeadingText.text = "目标点方向：未选择"
                 parkingWaypointStatusText?.text = "起点和目标点已清空"
             }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { setMargins(dp(7), 0, 0, 0) })
         }
@@ -2259,7 +2331,8 @@ class MainActivity : Activity() {
                     if (waypointStatus.state != "idle" || waypointStatus.total > 0) {
                         val current = if (waypointStatus.currentIndex >= 0) waypointStatus.currentIndex + 1 else 0
                         parkingWaypointStatusText?.text = when (waypointStatus.state) {
-                            "preparing", "active", "submitting" -> "多点导航 $current/${waypointStatus.total} · ${waypointStatus.message}"
+                            "preparing", "active", "submitting", "aligning", "verifying", "retrying" ->
+                                "多点导航 $current/${waypointStatus.total} · ${waypointStatus.message}"
                             "completed" -> "多点导航完成 · ${waypointStatus.total}/${waypointStatus.total}"
                             "failed", "rejected" -> "多点导航失败 · ${waypointStatus.message}"
                             "canceling", "canceled" -> waypointStatus.message
@@ -2284,7 +2357,6 @@ class MainActivity : Activity() {
             setStatus("请先在地图上选择至少一个目标点")
             return
         }
-        val startYaw = kotlin.math.atan2(points.first().y - start.y, points.first().x - start.x)
         val payloadPoints = JSONArray()
         points.forEachIndexed { index, point ->
             val next = when {
@@ -2292,7 +2364,9 @@ class MainActivity : Activity() {
                 index > 0 -> point
                 else -> point
             }
-            val yaw = if (index < points.lastIndex) {
+            val yaw = if (point.hasExplicitYaw) {
+                point.yaw
+            } else if (index < points.lastIndex) {
                 kotlin.math.atan2(next.y - point.y, next.x - point.x)
             } else if (index > 0) {
                 kotlin.math.atan2(point.y - points[index - 1].y, point.x - points[index - 1].x)
@@ -2308,7 +2382,7 @@ class MainActivity : Activity() {
             put("start", JSONObject().apply {
                 put("x", start.x)
                 put("y", start.y)
-                put("yaw", startYaw)
+                put("yaw", start.yaw)
             })
             put("points", payloadPoints)
         }

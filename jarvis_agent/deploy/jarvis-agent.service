@@ -5,9 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/jarvis-agent
-EnvironmentFile=/opt/jarvis-agent/.env
-ExecStart=/opt/jarvis-agent/.venv/bin/python -m uvicorn jarvis_agent.api:create_app --factory --host 0.0.0.0 --port 8100
+User=jetson
+WorkingDirectory=/home/jetson/jarvis-agent
+EnvironmentFile=/home/jetson/jarvis-agent/.env
+ExecStart=/home/jetson/jarvis-agent/.venv/bin/python -m uvicorn jarvis_agent.api:create_app --factory --host 0.0.0.0 --port 8100
 Restart=on-failure
 RestartSec=3
 

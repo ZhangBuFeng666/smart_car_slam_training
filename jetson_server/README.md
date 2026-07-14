@@ -2,11 +2,10 @@
 
 This service runs on the Jetson host and exposes HTTP endpoints for the Android APP.
 
-Motion commands use a persistent ROS 2 bridge. The server copies
-`motion_bridge.py` into the selected container once, keeps one `rclpy`
-publisher alive, and reuses it for every `/move/*` request. This avoids the
-multi-second overhead of starting `docker exec` and `ros2 topic pub` for every
-touch event.
+Motion and navigation commands use persistent ROS 2 bridges. The server copies
+the bridge scripts into the selected container, keeps their `rclpy` nodes
+alive, and reuses them for HTTP requests. This avoids the multi-second overhead
+of starting `docker exec` and ROS command processes for every operation.
 
 The server also copies `navigation_bridge.py` into the selected container and
 keeps a ROS subscriber alive. It sends the occupancy map, robot pose, goal and
@@ -20,13 +19,14 @@ cd ~/icar_app_server
 python3 server.py --container 8b98 --host 0.0.0.0 --port 8000
 ```
 
-All four files must be present in `~/icar_app_server`:
+All five files must be present in `~/icar_app_server`:
 
 ```text
 server.py
 motion_bridge.py
 navigation_bridge.py
 camera_stream.py
+icar-control.service
 ```
 
 At startup the server publishes one zero-velocity command to warm the bridge.
@@ -91,6 +91,9 @@ source /opt/ros/foxy/setup.bash
 python3 -c "import rclpy, tf2_ros; from nav_msgs.msg import OccupancyGrid, Path; from geometry_msgs.msg import PoseStamped"
 ros2 topic list | grep -E '/map|/amcl_pose|/plan|/global_plan|/goal_pose'
 ```
+
+The navigation bridge also supports waypoint execution, cancellation, and
+state polling through `/navigation/waypoints/*` and `/navigation/state`.
 
 ## Safety
 

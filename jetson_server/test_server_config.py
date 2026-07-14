@@ -650,10 +650,12 @@ class MotionRouteTest(unittest.TestCase):
         self.original_task_processes = getattr(server, "task_processes", None)
         server.SERVER_CONFIG["dry_run"] = True
         server.RUNNING.clear()
+        server.BASE_READY_CONTAINER = None
         server.NAVIGATION_BRIDGE = FakeNavigationBridge()
         self.handler = object.__new__(server.Handler)
 
     def tearDown(self):
+        server.BASE_READY_CONTAINER = None
         server.SERVER_CONFIG["dry_run"] = self.original_dry_run
         if self.original_bridge is None:
             if hasattr(server, "MOTION_BRIDGE"):
@@ -685,6 +687,18 @@ class MotionRouteTest(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(2.5, body["bridge_latency_ms"])
         self.assertEqual("dry_run", body["base"])
+
+    def test_repeated_move_requests_only_check_base_process_once(self):
+        server.SERVER_CONFIG["dry_run"] = False
+        bridge = FakeMotionBridge()
+        server.MOTION_BRIDGE = bridge
+
+        with patch.object(server, "task_processes", return_value="123 base") as processes:
+            self.handler.route("move/front", {})
+            self.handler.route("move/front", {})
+
+        processes.assert_called_once_with("base")
+        self.assertEqual(2, len(bridge.calls))
 
     def test_stop_route_does_not_start_base(self):
         bridge = FakeMotionBridge()

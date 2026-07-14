@@ -23,6 +23,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.TextUtils
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -55,6 +56,9 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+private const val VISION_PORT = 8200
+private const val VISION_POLL_INTERVAL_MILLIS = 1_000L
+
 private data class FullscreenAccessibilityState(
     val view: View,
     val importantForAccessibility: Int,
@@ -85,6 +89,13 @@ class MainActivity : Activity() {
     private var txtLog: TextView? = null
     private var vehicleStage: Vehicle3DStageView? = null
     private var parkingVisionView: ParkingVisionView? = null
+    private var visionStreamView: MjpegStreamView? = null
+    private var visionOverlayView: VisionDetectionOverlayView? = null
+    private var visionStreamStatusText: TextView? = null
+    private var visionModelStatusText: TextView? = null
+    private var visionPerformanceText: TextView? = null
+    private var visionDetectionList: LinearLayout? = null
+    private val visionMetricValues = mutableListOf<TextView>()
     private var parkingMapView: ParkingMapView? = null
     private var parkingMapCaption: TextView? = null
     private var parkingWaypointStatusText: TextView? = null
@@ -105,6 +116,8 @@ class MainActivity : Activity() {
     private val stopExecutor = Executors.newSingleThreadExecutor()
     private val voiceExecutor = Executors.newSingleThreadExecutor()
     private val navigationExecutor = Executors.newSingleThreadExecutor()
+    private val visionExecutor = Executors.newSingleThreadExecutor()
+    private val visionPollingGate = VisionPollingGate()
     private val moveGate = RequestGate()
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
 
@@ -124,6 +137,9 @@ class MainActivity : Activity() {
     private var navigationMapGeneration = -1L
     @Volatile private var navigationPollInFlight = false
     private val navigationPollRunnable = Runnable { pollNavigationState() }
+    @Volatile private var visionPollInFlight = false
+    private var visionPollingToken = 0L
+    private val visionPollRunnable = Runnable { pollVisionState() }
 
     private val repeatMoveRunnable = object : Runnable {
         override fun run() {
@@ -193,6 +209,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         releaseDriveCameraPanel()
+        releaseVisionPage()
         vehicleStage?.destroy()
         vehicleStage = null
         stopMove()
@@ -201,7 +218,8 @@ class MainActivity : Activity() {
         moveExecutor.shutdown()
         stopExecutor.shutdown()
     voiceExecutor.shutdown()
-    navigationExecutor.shutdownNow()
+        navigationExecutor.shutdownNow()
+        visionExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -212,6 +230,7 @@ class MainActivity : Activity() {
         if (selectedPage == "drive") {
             driveCameraPanel?.start(api().cameraStreamUrl())
         }
+        if (selectedPage == "vision") startVisionPage()
         if (selectedPage == "nav") startNavigationPolling()
     }
 
@@ -219,6 +238,7 @@ class MainActivity : Activity() {
         exitFullscreenDrive(DriveExitEvent.APP_PAUSE)
         forceStopForExit(DriveExitEvent.APP_PAUSE)
         driveCameraPanel?.stop()
+        stopVisionPage()
         vehicleStage?.onHostPause()
         parkingVisionView?.setActive(false)
         stopNavigationPolling()
@@ -229,6 +249,7 @@ class MainActivity : Activity() {
         exitFullscreenDrive(DriveExitEvent.PAGE_CHANGE)
         forceStopForExit(DriveExitEvent.PAGE_CHANGE)
         releaseDriveCameraPanel()
+        releaseVisionPage()
         stopNavigationPolling()
         saveConnectionInputs()
         selectedPage = key
@@ -241,6 +262,12 @@ class MainActivity : Activity() {
         vehicleStage?.destroy()
         vehicleStage = null
         parkingVisionView = null
+        visionMetricValues.clear()
+        visionStreamStatusText = null
+        visionOverlayView = null
+        visionModelStatusText = null
+        visionPerformanceText = null
+        visionDetectionList = null
         parkingMapView = null
         parkingMapCaption = null
         navigationManualSpeedText = null
@@ -279,6 +306,7 @@ class MainActivity : Activity() {
             navigationMapGeneration = -1L
             startNavigationPolling()
         }
+        if (key == "vision") startVisionPage()
 
         animatePageIn()
         scrollContent.post { scrollContent.smoothScrollTo(0, 0) }
@@ -497,8 +525,8 @@ class MainActivity : Activity() {
         pageContent.addView(parkingPageHeader(
             kicker = "B2 / VISION REVIEW",
             title = "停车视觉",
-            subtitle = "识别车位编号、占用状态、车辆颜色和禁停标志。",
-            status = "模型训练中"
+            subtitle = "Jetson 边缘模型实时识别车辆、车位、标志与通道障碍。",
+            status = "边缘 AI"
         ))
         pageContent.addView(parkingVisionSurface())
         pageContent.addView(parkingVisionSummary())
@@ -1692,21 +1720,54 @@ class MainActivity : Activity() {
         val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
         layoutParams = matchWrapParams(bottom = 12)
-        addView(ParkingVisionView(this@MainActivity).apply {
-            parkingVisionView = this
-            setPalette(palette)
+        val stage = FrameLayout(this@MainActivity).apply {
+            background = roundedBackground(palette.surfaceAlt, palette.border, 18)
+            clipToOutline = true
             elevation = dp(3).toFloat()
-        }, LinearLayout.LayoutParams(
+        }
+        stage.addView(MjpegStreamView(this@MainActivity).also { visionStreamView = it }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        stage.addView(VisionDetectionOverlayView(this@MainActivity).also { visionOverlayView = it }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        stage.addView(parkingChip("正在连接").also { visionStreamStatusText = it }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(32),
+            Gravity.TOP or Gravity.START
+        ).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+        stage.addView(parkingChip("模型加载中").also { visionModelStatusText = it }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(32),
+            Gravity.TOP or Gravity.END
+        ).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+        stage.addView(TextView(this@MainActivity).apply {
+            text = "等待推理数据"
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = roundedBackground("#99080B0A", "#44FFFFFF", 10)
+            visionPerformanceText = this
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.START
+        ).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+        addView(stage, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(InteractionSpec.parkingVisionStageHeightDp())
         ))
         val actions = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(parkingPrimaryButton("启动相机") {
-                sendGet(api().startTaskUrl("camera"), "启动相机")
+            addView(parkingPrimaryButton("重新连接视频") {
+                visionStreamView?.reconnect()
             }, LinearLayout.LayoutParams(0, dp(48), 1f))
-            addView(parkingOutlineButton("HSV 调参") {
-                sendGet(api().startTaskUrl("hsv"), "启动 HSV 调参")
+            addView(parkingOutlineButton("刷新检测结果") {
+                mainHandler.removeCallbacks(visionPollRunnable)
+                mainHandler.post(visionPollRunnable)
             }, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
                 setMargins(dp(9), 0, 0, 0)
             })
@@ -1714,28 +1775,228 @@ class MainActivity : Activity() {
         addView(actions, matchWrapParams(top = 9))
     }
 
-    private fun parkingVisionSummary(): LinearLayout = parkingMetricBand(listOf(
-        "12" to "可见车位",
-        "07" to "已占用",
-        "01" to "禁停提示"
-    ))
+    private fun parkingVisionSummary(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        background = roundedBackground(palette.surface, palette.border, 18)
+        setPadding(dp(5), dp(7), dp(5), dp(7))
+        layoutParams = matchWrapParams(bottom = 10)
+        listOf("车辆", "车位", "标志", "障碍").forEachIndexed { index, label ->
+            val value = TextView(this@MainActivity).apply {
+                text = "—"
+                gravity = Gravity.CENTER
+                setTextColor(color(palette.textPrimary))
+                textSize = 18f
+                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            visionMetricValues += value
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                addView(value)
+                addView(TextView(this@MainActivity).apply {
+                    text = label
+                    gravity = Gravity.CENTER
+                    setTextColor(color(palette.textSecondary))
+                    textSize = 9f
+                }, matchWrapParams(top = 2))
+            }, LinearLayout.LayoutParams(0, dp(44), 1f))
+            if (index < 3) addView(View(this@MainActivity).apply {
+                setBackgroundColor(color(palette.border))
+            }, LinearLayout.LayoutParams(dp(1), dp(30)).apply { gravity = Gravity.CENTER_VERTICAL })
+        }
+    }
 
     private fun parkingVisionClassRail(): LinearLayout = LinearLayout(this).apply {
+        val palette = parkingPalette()
         orientation = LinearLayout.VERTICAL
         layoutParams = matchWrapParams(bottom = 12)
-        addView(parkingSectionTitle("识别类别", "当前为界面预览，模型结果接入后实时更新"))
+        addView(parkingSectionTitle("识别类别", "模型支持九类停车场目标，结果来自小车实时画面。"))
         val scroll = HorizontalScrollView(this@MainActivity).apply {
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("车位编号", "占用状态", "车辆颜色", "禁停标志", "行人", "烟雾").forEach { label ->
-            row.addView(parkingChip(label), LinearLayout.LayoutParams(
+        listOf(
+            "parking_slot", "car", "no_parking_sign", "entrance_sign", "exit_sign",
+            "direction_arrow", "stop_line", "roadblock", "danger_sign"
+        ).forEach { label ->
+            row.addView(parkingChip(VisionUiSpec.labelText(label)), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
             ).apply { setMargins(0, dp(9), dp(8), 0) })
         }
         scroll.addView(row)
         addView(scroll)
+        addView(parkingSectionTitle("当前帧目标", "按置信度显示最近一帧的真实检测结果。"), matchWrapParams(top = 16))
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(palette.surface, palette.border, 16)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            addView(TextView(this@MainActivity).apply {
+                text = "等待视觉服务数据"
+                setTextColor(color(palette.textSecondary))
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(12), 0, dp(12))
+            })
+            visionDetectionList = this
+        }, matchWrapParams(top = 8))
+    }
+
+    private fun startVisionPage() {
+        if (selectedPage != "vision") return
+        visionPollingToken = visionPollingGate.start()
+        visionStreamView?.start(api().cameraStreamUrl()) { snapshot ->
+            if (selectedPage != "vision") return@start
+            visionStreamStatusText?.text = when (snapshot.state) {
+                CameraViewState.CONNECTING -> "正在连接"
+                CameraViewState.LIVE -> if (snapshot.fps > 0) "实时 · ${snapshot.fps} FPS" else "实时画面"
+                CameraViewState.BUSY -> "视频源忙"
+                CameraViewState.MISSING -> "未发现相机"
+                CameraViewState.DISCONNECTED -> "视频已断开"
+                CameraViewState.IDLE -> "视频未启动"
+            }
+        }
+        mainHandler.removeCallbacks(visionPollRunnable)
+        mainHandler.post(visionPollRunnable)
+    }
+
+    private fun stopVisionPage() {
+        visionPollingGate.stop()
+        mainHandler.removeCallbacks(visionPollRunnable)
+        visionStreamView?.stop()
+    }
+
+    private fun releaseVisionPage() {
+        visionPollingGate.stop()
+        mainHandler.removeCallbacks(visionPollRunnable)
+        visionStreamView?.release()
+        visionStreamView = null
+        visionOverlayView = null
+    }
+
+    private fun pollVisionState() {
+        val session = visionPollingToken
+        if (selectedPage != "vision" || !visionPollingGate.isActive(session)) return
+        if (visionPollInFlight) {
+            if (visionPollingGate.isActive(session)) {
+                mainHandler.postDelayed(visionPollRunnable, VISION_POLL_INTERVAL_MILLIS)
+            }
+            return
+        }
+        visionPollInFlight = true
+        val url = VisionApi(currentHost, VISION_PORT).detectionsUrl()
+        visionExecutor.execute {
+            val result = runCatching {
+                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 1_800
+                    readTimeout = 2_500
+                    useCaches = false
+                }
+                try {
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    check(code in 200..299) { "HTTP $code ${body.take(120)}" }
+                    VisionSnapshotParser.parse(body)
+                } finally {
+                    connection.disconnect()
+                }
+            }
+            runOnUiThread {
+                if (selectedPage == "vision" && visionPollingGate.isActive(session)) {
+                    result.onSuccess(::renderVisionSnapshot)
+                        .onFailure { renderVisionFailure(it.message ?: "视觉服务不可用") }
+                }
+                visionPollInFlight = false
+                if (
+                    selectedPage == "vision" &&
+                    !isFinishing &&
+                    visionPollingGate.isActive(session)
+                ) {
+                    mainHandler.postDelayed(visionPollRunnable, VISION_POLL_INTERVAL_MILLIS)
+                }
+            }
+        }
+    }
+
+    private fun renderVisionSnapshot(snapshot: VisionSnapshot) {
+        val model = snapshot.model
+        visionModelStatusText?.text = VisionUiSpec.modelText(model.ready, model.device, model.fp16)
+        visionPerformanceText?.text = if (snapshot.state == "live") {
+            VisionUiSpec.performanceText(snapshot.inferenceMs, snapshot.sourceFps)
+        } else {
+            snapshot.error ?: "等待实时帧"
+        }
+        pageStatusText?.text = when (snapshot.state) {
+            "live" -> "模型在线"
+            "connecting", "starting" -> "正在准备"
+            "error" -> "视觉异常"
+            else -> snapshot.state
+        }
+        val values = listOf(
+            snapshot.summary.cars,
+            snapshot.summary.parkingSlots,
+            snapshot.summary.signs,
+            snapshot.summary.obstacles
+        )
+        visionMetricValues.forEachIndexed { index, textView ->
+            textView.text = values.getOrNull(index)?.toString() ?: "0"
+        }
+        val currentDetections = if (snapshot.state == "live") snapshot.detections else emptyList()
+        visionOverlayView?.setDetections(currentDetections)
+        renderVisionDetections(currentDetections, snapshot.error)
+    }
+
+    private fun renderVisionFailure(message: String) {
+        visionModelStatusText?.text = "服务离线"
+        visionPerformanceText?.text = message.take(48)
+        pageStatusText?.text = "连接失败"
+        visionMetricValues.forEach { it.text = "—" }
+        visionOverlayView?.setDetections(emptyList())
+        renderVisionDetections(emptyList(), "无法读取检测结果")
+    }
+
+    private fun renderVisionDetections(detections: List<VisionDetection>, error: String?) {
+        val container = visionDetectionList ?: return
+        val palette = parkingPalette()
+        container.removeAllViews()
+        if (detections.isEmpty()) {
+            container.addView(TextView(this).apply {
+                text = error ?: "当前画面未检测到目标"
+                setTextColor(color(palette.textSecondary))
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(12), 0, dp(12))
+            })
+            return
+        }
+        detections.sortedByDescending { it.confidence }.take(8).forEachIndexed { index, detection ->
+            container.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(9), 0, dp(9))
+                addView(TextView(this@MainActivity).apply {
+                    text = VisionUiSpec.detectionLabel(detection)
+                    setTextColor(color(palette.textPrimary))
+                    textSize = 12f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(TextView(this@MainActivity).apply {
+                    text = VisionUiSpec.detectionConfidence(detection)
+                    setTextColor(color(palette.accentText))
+                    textSize = 11f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                })
+            })
+            if (index < detections.take(8).lastIndex) {
+                container.addView(View(this).apply {
+                    setBackgroundColor(color(palette.border))
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            }
+        }
     }
 
     private fun parkingMapSurface(): LinearLayout = LinearLayout(this).apply {
@@ -3461,7 +3722,11 @@ class MainActivity : Activity() {
 
     private fun sendMove(direction: String, quiet: Boolean) {
         val url = api().moveUrl(direction, currentSpeed(), currentTurn())
+        val requestedAt = SystemClock.elapsedRealtime()
+        recordMotionDiagnostic("direction=$direction state=requested at_ms=$requestedAt quiet=$quiet")
         if (!moveGate.tryBegin()) {
+            Log.i("ICarMotion", "direction=$direction skipped=gate_busy")
+            recordMotionDiagnostic("direction=$direction state=gate_busy at_ms=${SystemClock.elapsedRealtime()}")
             return
         }
 
@@ -3475,10 +3740,33 @@ class MainActivity : Activity() {
             quiet = true,
             executorService = moveExecutor,
             onFinished = { moveGate.finish() },
-            onLatencyMillis = { latency ->
-                fullscreenDriveOverlay?.updateControlLatency(latency)
+            onLatencyMillis = { networkLatency ->
+                val endToEndLatency = SystemClock.elapsedRealtime() - requestedAt
+                Log.i(
+                    "ICarMotion",
+                    "direction=$direction network_ms=$networkLatency end_to_end_ms=$endToEndLatency quiet=$quiet"
+                )
+                recordMotionDiagnostic(
+                    "direction=$direction state=completed network_ms=$networkLatency end_to_end_ms=$endToEndLatency quiet=$quiet"
+                )
+                fullscreenDriveOverlay?.updateControlLatency(endToEndLatency)
             }
         )
+    }
+
+    private fun recordMotionDiagnostic(value: String) {
+        val preferences = getSharedPreferences("motion_diagnostics", MODE_PRIVATE)
+        val entries = preferences.getString("history", "")
+            .orEmpty()
+            .lineSequence()
+            .filter { it.isNotBlank() }
+            .plus(value)
+            .toList()
+            .takeLast(30)
+        preferences.edit()
+            .putString("latest", value)
+            .putString("history", entries.joinToString("\n"))
+            .apply()
     }
 
     private fun sendGet(
@@ -3506,15 +3794,27 @@ class MainActivity : Activity() {
                     connectTimeout = 2500
                     readTimeout = readTimeoutMillis
                 }
-                val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val body = stream?.use { input ->
-                    BufferedReader(InputStreamReader(input)).readText()
-                }.orEmpty()
-                connection.disconnect()
-                "HTTP $code ${body.take(180)}"
+                try {
+                    val code = connection.responseCode
+                    val body = if (quiet) {
+                        ""
+                    } else {
+                        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                        stream?.use { input ->
+                            HttpResponseBodyReader.read(input, connection.contentLengthLong, includeBody = true)
+                        }.orEmpty()
+                    }
+                    "HTTP $code ${body.take(180)}"
+                } finally {
+                    connection.disconnect()
+                }
             }.getOrElse { error ->
                 "失败：${error.message ?: error.javaClass.simpleName}"
+            }
+            if (label.startsWith("移动 ")) {
+                runOnUiThread {
+                    recordMotionDiagnostic("label=$label server_response=${result.take(260)}")
+                }
             }
             latencyMeasurement?.complete(SystemClock.elapsedRealtime())
 

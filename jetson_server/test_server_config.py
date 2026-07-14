@@ -1070,6 +1070,8 @@ class MotionBridgeClientTest(unittest.TestCase):
             "pkill -f '[i]car_motion_bridge.py' || true",
             copy_runner.commands[1][-1],
         )
+        self.assertEqual("cp", copy_runner.commands[0][1])
+        self.assertEqual("exec", copy_runner.commands[1][1])
         self.assertEqual(1, first["sequence"])
         self.assertEqual(2, second["sequence"])
         client.shutdown(send_stop=False)
